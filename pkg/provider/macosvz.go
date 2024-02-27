@@ -148,7 +148,7 @@ func (p *MacOSVZProvider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 
 	var pods []*v1.Pod
 	for _, vm := range vms {
-		pod, err := p.virtualMachineToPod(ctx, vm, vm.Namespace, vm.Name)
+		pod, err := p.virtualMachineToPod(ctx, vm)
 		if err != nil {
 			return nil, err
 		}

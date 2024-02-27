@@ -189,8 +189,7 @@ func main() {
 					return nil, nil, err
 				}
 
-				macOSClient := client.NewMacOSClient()
-				p, err := provider.NewMacOSVZProvider(ctx, macOSClient, cfg.Pods, nodeName, platform, int32(listenPort))
+				p, err := provider.NewMacOSVZProvider(ctx, cfg.Pods, nodeName, platform, int32(listenPort))
 				if err != nil {
 					return nil, nil, err
 				}
@@ -243,7 +242,6 @@ func main() {
 			logger.SetLevel(lvl)
 
 			log.L = logruslogger.FromLogrus(logrus.NewEntry(logger))
-
 			ctx := log.WithLogger(cmd.Context(), log.G(ctx))
 
 			if err := run(ctx); err != nil {
