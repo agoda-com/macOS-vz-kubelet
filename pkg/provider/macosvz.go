@@ -23,9 +23,11 @@ type MacOSVZProvider struct {
 	macOSClient client.VirtualMachineClient
 	podsL       corev1listers.PodLister
 
-	nodeName           string
-	platform           string
-	daemonEndpointPort int32
+	nodeName                string
+	nodeIPAddress           string
+	nodeActiveInterfaceName string
+	platform                string
+	daemonEndpointPort      int32
 
 	cpu              resource.Quantity
 	memory           resource.Quantity
@@ -43,19 +45,24 @@ type MacOSVZProvider struct {
 }
 
 // NewMacOSVZProvider creates a new MacOSVZ provider.
-func NewMacOSVZProvider(ctx context.Context, macOSClient client.VirtualMachineClient, podsL corev1listers.PodLister, nodeName string, platform string, daemonEndpointPort int32) (*MacOSVZProvider, error) {
+func NewMacOSVZProvider(ctx context.Context, podsL corev1listers.PodLister, nodeName string, platform string, daemonEndpointPort int32) (*MacOSVZProvider, error) {
 	if platform != "darwin" {
 		return nil, errdefs.InvalidInputf("platform type %q is not supported", platform)
 	}
 
 	var p MacOSVZProvider
 
-	p.macOSClient = macOSClient
 	p.podsL = podsL
 
 	p.nodeName = nodeName
 	p.platform = platform
 	p.daemonEndpointPort = daemonEndpointPort
+
+	if err := p.retrieveNodeNetworkInformation(ctx); err != nil {
+		return nil, err
+	}
+
+	p.macOSClient = client.NewMacOSClient(p.nodeActiveInterfaceName)
 
 	if err := p.setupNodeCapacity(ctx); err != nil {
 		return nil, err

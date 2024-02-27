@@ -20,11 +20,15 @@ type VirtualMachineClient interface {
 type MacOSClient struct {
 	VirtualMachineClient
 
+	networkInterfaceIdentifier string
+
 	instances map[types.NamespacedName]*vm.VirtualMachineInstance
 }
 
-func NewMacOSClient() *MacOSClient {
+func NewMacOSClient(networkInterfaceIdentifier string) *MacOSClient {
 	return &MacOSClient{
+		networkInterfaceIdentifier: networkInterfaceIdentifier,
+
 		instances: make(map[types.NamespacedName]*vm.VirtualMachineInstance),
 	}
 }
@@ -40,7 +44,7 @@ func (m *MacOSClient) CreateVirtualMachine(ctx context.Context, namespace string
 		return err
 	}
 
-	config, err := config.NewVirtualMachineConfiguration(platformConfig, cpu, memorySize, "en0", "aa:bb:cc:dd:ee:ff")
+	config, err := config.NewVirtualMachineConfiguration(platformConfig, cpu, memorySize, m.networkInterfaceIdentifier)
 	if err != nil {
 		return err
 	}

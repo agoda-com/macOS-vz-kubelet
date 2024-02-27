@@ -1,17 +1,21 @@
 package config
 
 import (
+	"crypto/rand"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/Code-Hex/vz/v3"
 )
 
 type VirtualMachineConfiguration struct {
+	MACAddress net.HardwareAddr
+
 	*vz.VirtualMachineConfiguration
 }
 
-func NewVirtualMachineConfiguration(platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string, macAddress string) (*VirtualMachineConfiguration, error) {
+func NewVirtualMachineConfiguration(platformConfig *PlatformConfiguration, cpuCount uint, memorySize uint64, networkInterfaceIdentifier string) (*VirtualMachineConfiguration, error) {
 	bootloader, err := vz.NewMacOSBootLoader()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a new macos bootloader: %w", err)
@@ -57,18 +61,20 @@ func NewVirtualMachineConfiguration(platformConfig *PlatformConfiguration, cpuCo
 	if err != nil {
 		return nil, fmt.Errorf("failed to create network device configuration: %w", err)
 	}
-	if macAddress != "" {
-		// Set the MAC address
-		mac, err := net.ParseMAC(macAddress)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse mac address: %w", err)
-		}
-		macAddr, err := vz.NewMACAddress(mac)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create mac address: %w", err)
-		}
-		networkDeviceConfig.SetMACAddress(macAddr)
+	// Set the MAC address
+	macStr, err := generateRandomMAC()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate random mac address: %w", err)
 	}
+	mac, err := net.ParseMAC(macStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse mac address: %w", err)
+	}
+	macAddr, err := vz.NewMACAddress(mac)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create mac address: %w", err)
+	}
+	networkDeviceConfig.SetMACAddress(macAddr)
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
 		networkDeviceConfig,
 	})
@@ -112,7 +118,10 @@ func NewVirtualMachineConfiguration(platformConfig *PlatformConfiguration, cpuCo
 		return nil, fmt.Errorf("invalid configuration")
 	}
 
-	return &VirtualMachineConfiguration{config}, nil
+	return &VirtualMachineConfiguration{
+		MACAddress:                  mac,
+		VirtualMachineConfiguration: config,
+	}, nil
 }
 
 func createGraphicsDeviceConfiguration() (*vz.MacGraphicsDeviceConfiguration, error) {
@@ -178,4 +187,22 @@ func createAudioDeviceConfiguration() (*vz.VirtioSoundDeviceConfiguration, error
 		outputStream,
 	)
 	return audioConfig, nil
+}
+
+// generateRandomMAC generates a random MAC address.
+// It incorporates part of the current Unix timestamp to reduce the likelihood of duplicates.
+func generateRandomMAC() (string, error) {
+	buf := make([]byte, 6)
+	_, err := rand.Read(buf[2:])
+	if err != nil {
+		return "", err
+	}
+
+	// Incorporate the current Unix time into the first 2 bytes
+	now := uint32(time.Now().Unix())
+	buf[0] = byte(now>>24) & 0xFE // Ensure unicast and locally administered
+	buf[1] = byte(now >> 16)
+
+	mac := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
+	return mac, nil
 }

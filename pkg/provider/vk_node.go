@@ -11,6 +11,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	psnet "github.com/shirou/gopsutil/v3/net"
 
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
 
 	v1 "k8s.io/api/core/v1"
@@ -29,7 +30,16 @@ func (p *MacOSVZProvider) ConfigureNode(ctx context.Context, n *v1.Node) {
 	n.Status.Allocatable = capacity
 
 	n.Status.Conditions = p.nodeConditions()
-	n.Status.Addresses = p.nodeAddresses(ctx)
+	n.Status.Addresses = []v1.NodeAddress{
+		{
+			Type:    v1.NodeInternalIP,
+			Address: p.nodeIPAddress,
+		},
+		{
+			Type:    v1.NodeHostName,
+			Address: p.nodeName,
+		},
+	}
 	n.Status.DaemonEndpoints = p.nodeDaemonEndpoints()
 
 	n.Status.NodeInfo.MachineID = p.machineID
@@ -108,43 +118,6 @@ func (p *MacOSVZProvider) nodeConditions() []v1.NodeCondition {
 	}
 }
 
-// nodeAddresses returns the addresses for the node.
-func (p *MacOSVZProvider) nodeAddresses(ctx context.Context) []v1.NodeAddress {
-	ifs, err := psnet.InterfacesWithContext(ctx)
-	if err != nil {
-		log.G(ctx).WithError(err).Error("Error getting network interfaces")
-	}
-
-	addr := ""
-	for _, i := range ifs {
-		// en0 is a default interface on Apple Silicon machines
-		// for now, assuming that all machines provided are act as so
-		if i.Name == "en0" {
-			for _, a := range i.Addrs {
-				ip, _, err := net.ParseCIDR(a.Addr)
-				if err != nil {
-					log.G(ctx).WithError(err).Error("Error parsing CIDR")
-				}
-				if ip.To4() != nil {
-					addr = ip.String()
-				}
-			}
-			break
-		}
-	}
-
-	return []v1.NodeAddress{
-		{
-			Type:    v1.NodeInternalIP,
-			Address: addr,
-		},
-		{
-			Type:    v1.NodeHostName,
-			Address: p.nodeName,
-		},
-	}
-}
-
 // nodeDaemonEndpoints returns NodeDaemonEndpoints for the node status within Kubernetes.
 func (p *MacOSVZProvider) nodeDaemonEndpoints() v1.NodeDaemonEndpoints {
 	return v1.NodeDaemonEndpoints{
@@ -152,6 +125,45 @@ func (p *MacOSVZProvider) nodeDaemonEndpoints() v1.NodeDaemonEndpoints {
 			Port: p.daemonEndpointPort,
 		},
 	}
+}
+
+// retrieveNodeNetworkInformation retrieves the node's network information.
+func (p *MacOSVZProvider) retrieveNodeNetworkInformation(ctx context.Context) error {
+	ifs, err := psnet.InterfacesWithContext(ctx)
+	if err != nil {
+		log.G(ctx).WithError(err).Error("Error getting network interfaces")
+		return err
+	}
+
+	addr := ""
+	activeInterfaceName := ""
+	for _, i := range ifs {
+		for _, a := range i.Addrs {
+			// Parse the IP address from the address string
+			ip, _, err := net.ParseCIDR(a.Addr)
+			if err != nil {
+				log.G(ctx).WithError(err).Error("Error parsing CIDR")
+				continue
+			}
+			// Check if the IP is a valid IPv4 address and not a loopback address
+			if ip.To4() != nil && !ip.IsLoopback() {
+				addr = ip.String()
+				activeInterfaceName = i.Name
+				break
+			}
+		}
+		if addr != "" {
+			break
+		}
+	}
+
+	if addr == "" {
+		return errdefs.NotFound("no valid IP address found")
+	}
+
+	p.nodeIPAddress = addr
+	p.nodeActiveInterfaceName = activeInterfaceName
+	return nil
 }
 
 // setupNodeCapacity sets the capacity of the node based on the host's resources.
