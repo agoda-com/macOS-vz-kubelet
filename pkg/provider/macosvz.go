@@ -13,6 +13,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api/statsv1alpha1"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
+	"github.com/virtual-kubelet/virtual-kubelet/trace"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -81,7 +82,9 @@ var (
 
 // CreatePod takes a Kubernetes Pod and deploys it within the MacOS provider.
 func (p *MacOSVZProvider) CreatePod(ctx context.Context, pod *v1.Pod) error {
-	log.G(ctx).Infof("Received CreatePod request for %s/%s.", pod.Namespace, pod.Name)
+	ctx, span := trace.StartSpan(ctx, "vz.CreatePod")
+	defer span.End()
+	log.G(ctx).Infof("Received CreatePod request")
 
 	// TODO: better container selection for cases like gitlab runner
 	rl := pod.Spec.Containers[0].Resources.Requests
@@ -100,21 +103,27 @@ func (p *MacOSVZProvider) CreatePod(ctx context.Context, pod *v1.Pod) error {
 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.
 func (p *MacOSVZProvider) UpdatePod(ctx context.Context, pod *v1.Pod) error {
-	log.G(ctx).Infof("Received UpdatePod request for %s/%s.", pod.Namespace, pod.Name)
+	ctx, span := trace.StartSpan(ctx, "vz.UpdatePod")
+	defer span.End()
+	log.G(ctx).Infof("Received UpdatePod request")
 
 	return errNotImplemented
 }
 
 // DeletePod takes a Kubernetes Pod and deletes it from the provider.
 func (p *MacOSVZProvider) DeletePod(ctx context.Context, pod *v1.Pod) error {
-	log.G(ctx).Infof("Received DeletePod request for %s/%s.", pod.Namespace, pod.Name)
+	ctx, span := trace.StartSpan(ctx, "vz.DeletePod")
+	defer span.End()
+	log.G(ctx).Infof("Received DeletePod request")
 
 	return p.macOSClient.DeleteVirtualMachine(ctx, pod.Namespace, pod.Name)
 }
 
 // GetPod retrieves a pod by name from the provider (can be cached).
 func (p *MacOSVZProvider) GetPod(ctx context.Context, namespace, name string) (*v1.Pod, error) {
-	log.G(ctx).Infof("Received GetPod request for %s/%s.", namespace, name)
+	ctx, span := trace.StartSpan(ctx, "vz.GetPod")
+	defer span.End()
+	log.G(ctx).Infof("Received GetPod request")
 
 	vm, err := p.macOSClient.GetVirtualMachine(ctx, namespace, name)
 	if err != nil {
@@ -122,12 +131,14 @@ func (p *MacOSVZProvider) GetPod(ctx context.Context, namespace, name string) (*
 	}
 
 	// TODO: check if pod doesnt exist in k8s, will it reconcile?
-	return p.virtualMachineToPod(ctx, vm, namespace, name)
+	return p.virtualMachineToPod(ctx, vm)
 }
 
 // GetPodStatus retrieves the status of a pod by name from the provider.
 func (p *MacOSVZProvider) GetPodStatus(ctx context.Context, namespace, name string) (*v1.PodStatus, error) {
-	log.G(ctx).Infof("Received GetPodStatus request for %s/%s.", namespace, name)
+	ctx, span := trace.StartSpan(ctx, "vz.GetPodStatus")
+	defer span.End()
+	log.G(ctx).Infof("Received GetPodStatus request")
 
 	vm, err := p.macOSClient.GetVirtualMachine(ctx, namespace, name)
 	if err != nil {
@@ -139,7 +150,9 @@ func (p *MacOSVZProvider) GetPodStatus(ctx context.Context, namespace, name stri
 
 // GetPods retrieves a list of all pods running on the provider (can be cached).
 func (p *MacOSVZProvider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
-	log.G(ctx).Info("Received GetPods request.")
+	ctx, span := trace.StartSpan(ctx, "vz.GetPods")
+	defer span.End()
+	log.G(ctx).Info("Received GetPods request")
 
 	vms, err := p.macOSClient.GetVirtualMachineListResult(ctx)
 	if err != nil {
@@ -160,38 +173,50 @@ func (p *MacOSVZProvider) GetPods(ctx context.Context) ([]*v1.Pod, error) {
 
 // GetContainerLogs retrieves the logs of a container by name from the provider.
 func (p *MacOSVZProvider) GetContainerLogs(ctx context.Context, namespace, podName, containerName string, opts api.ContainerLogOpts) (io.ReadCloser, error) {
-	log.G(ctx).Infof("Received GetContainerLogs request for %s/%s/%s.", namespace, podName, containerName)
+	ctx, span := trace.StartSpan(ctx, "vz.GetContainerLogs")
+	defer span.End()
+	log.G(ctx).Infof("Received GetContainerLogs request")
 	return nil, errNotImplemented
 }
 
 // RunInContainer executes a command in a container in the pod, copying data
 // between in/out/err and the container's stdin/stdout/stderr.
 func (p *MacOSVZProvider) RunInContainer(ctx context.Context, namespace, podName, containerName string, cmd []string, attach api.AttachIO) error {
-	log.G(ctx).Infof("Received RunInContainer request for %s/%s/%s.", namespace, podName, containerName)
+	ctx, span := trace.StartSpan(ctx, "vz.RunInContainer")
+	defer span.End()
+	log.G(ctx).Infof("Received RunInContainer request")
 	return errNotImplemented
 }
 
 // AttachToContainer attaches to the executing process of a container in the pod, copying data
 // between in/out/err and the container's stdin/stdout/stderr.
 func (p *MacOSVZProvider) AttachToContainer(ctx context.Context, namespace, podName, containerName string, attach api.AttachIO) error {
-	log.G(ctx).Infof("Received AttachToContainer request for %s/%s/%s.", namespace, podName, containerName)
+	ctx, span := trace.StartSpan(ctx, "vz.AttachToContainer")
+	defer span.End()
+	log.G(ctx).Infof("Received AttachToContainer request")
 	return errNotImplemented
 }
 
 // GetStatsSummary gets the stats for the node, including running pods
 func (p *MacOSVZProvider) GetStatsSummary(ctx context.Context) (*statsv1alpha1.Summary, error) {
-	log.G(ctx).Info("Received GetStatsSummary request.")
+	ctx, span := trace.StartSpan(ctx, "vz.GetStatsSummary")
+	defer span.End()
+	log.G(ctx).Info("Received GetStatsSummary request")
 	return nil, errNotImplemented
 }
 
 // GetMetricsResource gets the metrics for the node, including running pods
 func (p *MacOSVZProvider) GetMetricsResource(ctx context.Context) ([]*dto.MetricFamily, error) {
-	log.G(ctx).Info("Received GetMetricsResource request.")
+	ctx, span := trace.StartSpan(ctx, "vz.GetMetricsResource")
+	defer span.End()
+	log.G(ctx).Info("Received GetMetricsResource request")
 	return nil, errNotImplemented
 }
 
 // PortForward forwards a local port to a port on the pod
 func (p *MacOSVZProvider) PortForward(ctx context.Context, namespace, pod string, port int32, stream io.ReadWriteCloser) error {
-	log.G(ctx).Infof("Received PortForward request for %s/%s:%d.", namespace, pod, port)
+	ctx, span := trace.StartSpan(ctx, "vz.PortForward")
+	defer span.End()
+	log.G(ctx).Infof("Received PortForward request")
 	return errNotImplemented
 }

@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/provider"
 	"github.com/mitchellh/go-homedir"
 	"github.com/shirou/gopsutil/v3/host"
@@ -40,8 +39,8 @@ var (
 	taintEffect = envOrDefault("VKUBELET_TAINT_EFFECT", string(v1.TaintEffectNoSchedule))
 	taintValue  = envOrDefault("VKUBELET_TAINT_VALUE", "macOS-vz")
 
-	logLevel = "info"
-	// traceSampleRate string
+	logLevel        = "info"
+	traceSampleRate string
 
 	// k8s
 	kubeConfigPath  = os.Getenv("KUBECONFIG")
@@ -168,9 +167,9 @@ func main() {
 	}
 
 	run := func(ctx context.Context) error {
-		// if err := configureTracing(nodeName, traceSampleRate); err != nil {
-		// 	return err
-		// }
+		if err := configureTracing(nodeName, traceSampleRate, clientCACert); err != nil {
+			return err
+		}
 
 		node, err := nodeutil.NewNode(nodeName,
 			func(cfg nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
@@ -288,6 +287,8 @@ func main() {
 		"The duration to cache 'authorized' responses from the webhook authorizer.")
 	flags.DurationVar(&webhookAuthzUnauthedCacheTTL, "authorization-webhook-cache-unauthorized-ttl", webhookAuthzUnauthedCacheTTL,
 		"The duration to cache 'unauthorized' responses from the webhook authorizer.")
+
+	flags.StringVar(&traceSampleRate, "trace-sample-rate", traceSampleRate, "set probability of tracing samples")
 
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if !errors.Is(err, context.Canceled) {
