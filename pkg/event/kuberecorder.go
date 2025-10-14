@@ -12,6 +12,10 @@ import (
 
 const (
 	UIDField = "uid"
+
+	// Upstream kubelet records "FailedToRetrieveImagePullSecret" when pull secrets cannot be resolved:
+	// https://github.com/kubernetes/website/blob/main/content/en/docs/tasks/configure-pod-container/pull-image-private-registry.md
+	eventReasonFailedImagePullSecrets = "FailedToRetrieveImagePullSecret"
 )
 
 type objectRefKeyType struct{}
@@ -88,6 +92,10 @@ func (r *KubeEventRecorder) FailedPostStartHook(ctx context.Context, containerNa
 func (r *KubeEventRecorder) FailedPreStopHook(ctx context.Context, containerName string, cmd []string, err error) {
 	cmdStr := fmt.Sprintf("[%s]", strings.Join(cmd, ", "))
 	r.recordEvent(ctx, containerName, corev1.EventTypeWarning, events.FailedPreStopHook, "Exec lifecycle hook (%s) for Container \"%s\" failed - error: %v", cmdStr, containerName, err)
+}
+
+func (r *KubeEventRecorder) FailedToResolveImagePullSecrets(ctx context.Context, err error) {
+	r.recordEvent(ctx, "", corev1.EventTypeWarning, eventReasonFailedImagePullSecrets, "Failed to resolve image pull secrets: %v", err)
 }
 
 func (r *KubeEventRecorder) recordEvent(ctx context.Context, containerName, eventType, reason, messageFmt string, args ...interface{}) {

@@ -15,4 +15,5 @@ type EventRecorder interface {
 	FailedToStartContainer(ctx context.Context, containerName string, err error)
 	FailedPostStartHook(ctx context.Context, containerName string, cmd []string, err error)
 	FailedPreStopHook(ctx context.Context, containerName string, cmd []string, err error)
+	FailedToResolveImagePullSecrets(ctx context.Context, err error)
 }

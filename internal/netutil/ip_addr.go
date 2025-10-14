@@ -55,7 +55,7 @@ func RetrieveIPFromARPTable(ctx context.Context, macAddr string) (string, error)
 			return "", ctx.Err()
 		default:
 			// Execute the arp command
-			cmd := exec.Command("arp", "-an")
+			cmd := exec.CommandContext(ctx, "arp", "-an")
 			cmdOutput, err := cmd.Output()
 			if err != nil {
 				return "", err

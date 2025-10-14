@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"strings"
 	"sync"
@@ -18,11 +19,13 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/node/nodeutil"
 
 	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourceapi "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,14 +157,31 @@ func TestCreatePod(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
+			var err error
 
 			// Set up the fake Kubernetes client
 			fakeClient := fake.NewSimpleClientset()
 
 			// Add ConfigMaps to the fake client if present
 			for _, cm := range tc.configMaps {
-				_, err := fakeClient.CoreV1().ConfigMaps(cm.Namespace).Create(ctx, cm, metav1.CreateOptions{})
+				_, err = fakeClient.CoreV1().ConfigMaps(cm.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 				require.NoError(t, err)
+			}
+
+			if tc.serviceAccountName == "" {
+				tc.serviceAccountName = "default"
+			}
+
+			_, err = fakeClient.CoreV1().ServiceAccounts(tc.pod.Namespace).Create(ctx, &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tc.serviceAccountName,
+					Namespace: tc.pod.Namespace,
+				},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			if tc.pod.Spec.ServiceAccountName == "" {
+				tc.pod.Spec.ServiceAccountName = tc.serviceAccountName
 			}
 
 			// Mock Virtualization Client
@@ -169,7 +189,7 @@ func TestCreatePod(t *testing.T) {
 
 			// Mock token generation
 			if tc.expectedToken != "" {
-				fakeClient.Fake.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				fakeClient.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
 					return true, &authv1.TokenRequest{
 						Status: authv1.TokenRequestStatus{Token: tc.expectedToken},
 					}, nil
@@ -188,7 +208,10 @@ func TestCreatePod(t *testing.T) {
 			expectedPod := tc.pod.DeepCopy()
 
 			// Mock Virtualization Client's CreateVirtualizationGroup method
-			vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, tc.expectedToken, tc.expectedConfigMaps).Return(nil)
+			vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, tc.expectedToken, tc.expectedConfigMaps, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+				_, ok := store.ForImage("nginx:latest")
+				return !ok
+			})).Return(nil)
 
 			// Call the provider's CreatePod function
 			err = p.CreatePod(ctx, tc.pod)
@@ -207,6 +230,122 @@ func TestCreatePod(t *testing.T) {
 				Name:      tc.pod.Name,
 				UID:       tc.pod.UID,
 			})
+		})
+	}
+}
+
+func TestCreatePod_ImagePullSecrets(t *testing.T) {
+	authJSON := base64.StdEncoding.EncodeToString([]byte("jsonuser:jsonpass"))
+
+	tests := []struct {
+		name         string
+		secretType   corev1.SecretType
+		secretData   map[string][]byte
+		createSecret bool
+		expectErr    bool
+		expectedHost string
+		expectedCred resource.RegistryCredentials
+		podImage     string
+	}{
+		{
+			name:         "DockerConfigJSON",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authJSON + `"}}}`)},
+			createSecret: true,
+			expectedHost: "registry.example.com",
+			expectedCred: resource.RegistryCredentials{Username: "jsonuser", Password: "jsonpass", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:1",
+		},
+		{
+			name:         "InvalidSecretData",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{}}`)},
+			createSecret: true,
+			expectErr:    true,
+			podImage:     "registry.example.com/app:3",
+		},
+		{
+			name:         "MissingSecret",
+			createSecret: false,
+			expectErr:    true,
+			podImage:     "registry.example.com/app:4",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fakeClient := fake.NewSimpleClientset()
+
+			_, err := fakeClient.CoreV1().ServiceAccounts("default").Create(ctx, &corev1.ServiceAccount{
+				ObjectMeta:       metav1.ObjectMeta{Name: "default", Namespace: "default"},
+				ImagePullSecrets: []corev1.LocalObjectReference{{Name: "pull-secret"}},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			if tc.createSecret {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: "default"},
+					Type:       tc.secretType,
+					Data:       tc.secretData,
+				}
+				_, err := fakeClient.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+
+			vzClient := clientmocks.NewVzClientInterface(t)
+
+			providerConfig := provider.MacOSVZProviderConfig{
+				Platform:      defaultPlatform,
+				K8sClient:     fakeClient,
+				EventRecorder: event.LogEventRecorder{},
+			}
+
+			p, err := provider.NewMacOSVZProvider(ctx, vzClient, providerConfig)
+			require.NoError(t, err)
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "default",
+					ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "pull-secret"}},
+					Containers: []corev1.Container{
+						{
+							Name:  "macos",
+							Image: tc.podImage,
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resourceapi.MustParse("1"),
+									corev1.ResourceMemory: resourceapi.MustParse("256Mi"),
+								},
+							},
+						},
+					},
+				},
+			}
+
+			expectedPod := pod.DeepCopy()
+
+			if !tc.expectErr {
+				vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, "", mock.Anything, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+					cred, ok := store.ForImage(tc.podImage)
+					if !ok {
+						return false
+					}
+					return cred.Username == tc.expectedCred.Username && cred.Password == tc.expectedCred.Password
+				})).Return(nil)
+			}
+
+			err = p.CreatePod(ctx, pod)
+			if tc.expectErr {
+				require.Error(t, err)
+				assert.True(t, errdefs.IsInvalidInput(err))
+				vzClient.AssertNotCalled(t, "CreateVirtualizationGroup", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				return
+			}
+
+			require.NoError(t, err)
+			vzClient.AssertExpectations(t)
 		})
 	}
 }

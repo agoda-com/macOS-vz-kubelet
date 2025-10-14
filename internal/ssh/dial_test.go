@@ -72,7 +72,8 @@ func startMockSSHServer(t *testing.T, addr string) net.Listener {
 	}
 	config.AddHostKey(private)
 
-	listener, err := net.Listen("tcp", addr)
+	listenConfig := &net.ListenConfig{}
+	listener, err := listenConfig.Listen(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to listen on %s: %v", addr, err)
 	}

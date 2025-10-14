@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/vm/config"
 
 	"github.com/virtual-kubelet/virtual-kubelet/log"
@@ -63,7 +64,7 @@ func NewManager(eventRecorder event.EventRecorder, cachePath string) *Manager {
 // Returns:
 // - config.MacPlatformConfigurationOptions: The result of the download if successful.
 // - error: Any error that occurred during the download, or if the subscriber's context is canceled.
-func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool) (cfg config.MacPlatformConfigurationOptions, d time.Duration, err error) {
+func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool, creds resource.RegistryCredentials) (cfg config.MacPlatformConfigurationOptions, d time.Duration, err error) {
 	ctx, span := trace.StartSpan(ctx, "Manager.Download")
 	ctx = span.WithFields(ctx, log.Fields{
 		"ref":            ref,
@@ -94,6 +95,7 @@ func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool)
 
 	state.once.Do(func() {
 		logger.Infof("Initiating download %q per request", ref)
+		downloadCreds := creds
 		// Use a background context to manage the underlying download
 		var downloadCtx context.Context
 		downloadCtx, state.cancelFunc = context.WithCancel(context.Background())
@@ -116,7 +118,7 @@ func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool)
 		// Performing download in a go routine to keep listening for context cancellation.
 		// Start Download manages its own background context and cancels it when the download is done.
 		// nolint: contextcheck
-		go m.startDownload(downloadCtx, state, ref, ignoreExisting)
+		go m.startDownload(downloadCtx, state, ref, ignoreExisting, downloadCreds)
 	})
 
 	// Link the download span to the subscriber's span
@@ -131,7 +133,7 @@ func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool)
 }
 
 // startDownload starts the download operation and manages the state of the download.
-func (m *Manager) startDownload(ctx context.Context, state *state, ref string, ignoreExisting bool) {
+func (m *Manager) startDownload(ctx context.Context, state *state, ref string, ignoreExisting bool, creds resource.RegistryCredentials) {
 	defer func() {
 		close(state.done)
 		state.cancelFunc()
@@ -153,6 +155,7 @@ func (m *Manager) startDownload(ctx context.Context, state *state, ref string, i
 		Ref:             ref,
 		StorePath:       m.cachePath,
 		IgnoreExisiting: ignoreExisting,
+		Credentials:     creds,
 	}, m.eventRecorder)
 
 	state.duration = time.Since(startTime)

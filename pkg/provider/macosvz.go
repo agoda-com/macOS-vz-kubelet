@@ -104,7 +104,13 @@ func (p *MacOSVZProvider) CreatePod(ctx context.Context, pod *corev1.Pod) (err e
 		return err
 	}
 
-	return p.vzClient.CreateVirtualizationGroup(ctx, pod, serviceAccountToken, configMaps)
+	registryCreds, err := p.resolveImagePullCredentials(ctx, pod)
+	if err != nil {
+		p.eventRecorder.FailedToResolveImagePullSecrets(ctx, err)
+		return errdefs.AsInvalidInput(err)
+	}
+
+	return p.vzClient.CreateVirtualizationGroup(ctx, pod, serviceAccountToken, configMaps, registryCreds)
 }
 
 // UpdatePod takes a Kubernetes Pod and updates it within the provider.

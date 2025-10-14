@@ -55,3 +55,7 @@ func (r LogEventRecorder) FailedPreStopHook(ctx context.Context, containerName s
 	cmdStr := fmt.Sprintf("[%s]", strings.Join(cmd, ", "))
 	log.G(ctx).WithError(err).Errorf("Exec lifecycle hook (%s) for Container \"%s\" failed - error: %v", cmdStr, containerName, err)
 }
+
+func (r LogEventRecorder) FailedToResolveImagePullSecrets(ctx context.Context, err error) {
+	log.G(ctx).WithError(err).Warn("Failed to resolve image pull secrets")
+}

@@ -21,7 +21,7 @@ type VirtualizationGroup struct {
 
 // VzClientInterface defines the methods that a VzClient implementation should provide.
 type VzClientInterface interface {
-	CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap) error
+	CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap, creds resource.RegistryCredentialStore) error
 	DeleteVirtualizationGroup(ctx context.Context, namespace, name string, gracePeriod int64) error
 	GetVirtualizationGroup(ctx context.Context, namespace, name string) (*VirtualizationGroup, error)
 	GetVirtualizationGroupListResult(ctx context.Context) (map[types.NamespacedName]*VirtualizationGroup, error)

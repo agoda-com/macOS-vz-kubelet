@@ -90,7 +90,7 @@ func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, net
 }
 
 // CreateVirtualizationGroup creates a new virtualization group based on the provided Kubernetes pod.
-func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap) (err error) {
+func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev1.Pod, serviceAccountToken string, configMaps map[string]*corev1.ConfigMap, creds resource.RegistryCredentialStore) (err error) {
 	ctx, span := trace.StartSpan(ctx, "VZClient.CreateVirtualizationGroup")
 	key := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
 	extras := &virtualizationGroupExtras{
@@ -129,6 +129,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 	g.Go(func() error {
 		// vz: always assume that first container is macOS container
 		macOSContainer := pod.Spec.Containers[0]
+		vmCreds, _ := creds.ForImage(macOSContainer.Image)
 
 		// Extract and validate CPU and memory requests
 		rl := macOSContainer.Resources.Requests
@@ -177,12 +178,15 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			Env:              macOSContainer.Env,
 			PostStartAction:  postStartAction,
 			IgnoreImageCache: pullPolicy == corev1.PullAlways,
+			RegistryCreds:    vmCreds,
 		})
 	})
 
 	for i := 1; i < len(pod.Spec.Containers); i++ {
 		container := pod.Spec.Containers[i]
 		g.Go(func() error {
+			containerCreds, _ := creds.ForImage(container.Image)
+
 			mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, container, pod, serviceAccountToken, configMaps)
 			if err != nil {
 				return err
@@ -213,6 +217,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 					Stdin:           container.Stdin,
 					StdinOnce:       container.StdinOnce,
 					PostStartAction: postStartAction,
+					RegistryCreds:   containerCreds,
 				},
 			)
 		})

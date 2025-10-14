@@ -2,11 +2,11 @@ package provider_test
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/agoda-com/macOS-vz-kubelet/internal/kubetest"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/netutil"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/utils"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/client"
@@ -30,7 +30,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+func SetupEnvTest(tb testing.TB) *rest.Config {
+	tb.Helper()
+
+	if testing.Short() || os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		tb.SkipNow()
+	}
+
+	env := &envtest.Environment{}
+	cfg, err := env.Start()
+	require.NoErrorf(tb, err, "start envtest: %v", err)
+
+	tb.Cleanup(func() {
+		if err := env.Stop(); err != nil {
+			tb.Log("stop envtest: ", err)
+		}
+	})
+
+	return cfg
+}
 
 func TestNodeConfiguration(t *testing.T) {
 	nodeName := "test-node"
@@ -178,7 +200,7 @@ func setupNodeProvider(t *testing.T, nodeName string, nodeIPAddress string, daem
 	platform, _, _, err := host.PlatformInformationWithContext(ctx)
 	require.NoError(t, err)
 
-	kcfg := kubetest.SetupEnvTest(t)
+	kcfg := SetupEnvTest(t)
 	kcl, err := kubernetes.NewForConfig(kcfg)
 	require.NoErrorf(t, err, "create client: %v", err)
 

@@ -53,6 +53,7 @@ type VirtualMachineParams struct {
 	Env              []corev1.EnvVar
 	PostStartAction  *resource.ExecAction
 	IgnoreImageCache bool
+	RegistryCreds    resource.RegistryCredentials
 }
 
 // MacOSClient manages the lifecycle of macOS virtual machines.
@@ -127,7 +128,7 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 		return
 	}
 
-	cfg, duration, err := c.downloadManager.Download(downloadCtx, params.Image, params.IgnoreImageCache)
+	cfg, duration, err := c.downloadManager.Download(downloadCtx, params.Image, params.IgnoreImageCache, params.RegistryCreds)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			// Only log the error if it's not due to context cancellation

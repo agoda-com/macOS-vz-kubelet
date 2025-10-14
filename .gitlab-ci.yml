@@ -20,22 +20,22 @@ stages:
     - .mise
 
 default:
+  # All jobs are interruptible.
+  # If any job must be uninterruptible, override this flag at the job level
+  # `interruptible: false`
+  interruptible: true
   cache:
     - <<: *cache_mod
       policy: pull-push
     - <<: *cache_mise
       policy: pull-push
-  # All jobs are interruptible.
-  # If any job must be uninterruptible, override this flag at the job level
-  # `interruptible: false`
-  interruptible: true
 
 variables:
   APP_NAME: "MacOSVK"
-  IMAGE: "macos-sonoma-runner:15.0.1"
+  MACOS_IMAGE: "macos-sonoma-runner:15.0.1"
 
 .go-build-macos:
-  image: "$IMAGE"
+  image: "$MACOS_IMAGE"
   tags:
     - macos.medium
   variables:
@@ -48,6 +48,7 @@ variables:
       mkdir -p ".go"
       curl -fsS https://mise.run | sh
       export PATH="$HOME/.local/bin:$PATH"
+      mise trust .mise.toml
       mise install
       eval "$(mise activate bash --shims)"
       printf "\e[0Ksection_end:%s:prepare_go\r\e[0K\n" "$(date +%s)"
@@ -119,6 +120,7 @@ e2e-test:
   tags:
     - macOS-vz-kubelet-e2e
   stage: e2e-test
+  resource_group: e2e
   needs: []
   dependencies: []
   # Issue with .go directory permissions on the baremetal
@@ -143,8 +145,21 @@ e2e-test:
     APISERVER_CERT_LOCATION: "/Users/master/.fleet/fleetd/volumes/kubelet/tls.crt"
     APISERVER_KEY_LOCATION: "/Users/master/.fleet/fleetd/volumes/kubelet/tls.key"
     VZ_SSH_USER: "master"
+    E2E_MACOS_IMAGE: "localhost:5000/macos:latest"
+    E2E_MACOS_IMAGE_DIR: "/Users/master/Library/Caches/com.agoda.fleet.virtualization/blobs/macos-sonoma-runner/15.0.1/"
+    BUSYBOX_IMAGE: "busybox:1.37.0"
+    DOCKER_SOCKET_PATH: "unix:///Users/master/.colima/docker.sock"
+    NODE_NAME: "macos-vz-kubelet-e2e-test-node-$CI_JOB_ID"
   script:
     - make e2e-test coverage
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" == "canceled" ]; then
+        unset KUBECONFIG
+        export KUBECONFIG="${HOME}/.kube/config"
+        kubectl delete node "$NODE_NAME" --ignore-not-found || true
+      fi
+    - !reference [.go-coverage, after_script]
 
 .build:
   extends:

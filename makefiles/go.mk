@@ -5,13 +5,13 @@ include makefiles/base.mk
 
 ### Variables
 
-GOLANGCILINT_VERSION ?= v1.64.8
-GOTESTSUM_VERSION ?= v1.11.0
+GOLANGCILINT_VERSION ?= v2.5.0
+GOTESTSUM_VERSION ?= v1.13.0
 GOCOV_VERSION ?= v1.1.0
 GOCOV_HTML_VERSION ?= v1.4.0
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.30
+ENVTEST_K8S_VERSION = 1.34
 
 GOTESTPKG ?= ./...
 

@@ -21,6 +21,7 @@ type ContainerParams struct {
 	Name            string
 	Image           string
 	ImagePullPolicy corev1.PullPolicy
+	RegistryCreds   resource.RegistryCredentials
 
 	Mounts          []volumes.Mount
 	Env             []corev1.EnvVar

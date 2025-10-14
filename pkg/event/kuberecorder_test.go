@@ -81,6 +81,12 @@ func TestKubeEventRecorder(t *testing.T) {
 				recorder.FailedPreStopHook(ctx, "nginx-container", []string{"echo", "hello"}, errors.New("hook failed"))
 			},
 		},
+		{
+			name: "FailedToResolveImagePullSecrets",
+			action: func(ctx context.Context, recorder *event.KubeEventRecorder) {
+				recorder.FailedToResolveImagePullSecrets(ctx, errors.New("secret missing"))
+			},
+		},
 	}
 
 	for _, tt := range tests {

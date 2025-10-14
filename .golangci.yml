@@ -1,49 +1,9 @@
+version: "2"
 run:
-  timeout: 5m
   allow-parallel-runners: true
-
-issues:
-  # don't skip warning about doc comments
-  # don't exclude the default set of lint
-  exclude-use-default: false
-  # restore some of the defaults
-  # (fill in the rest as needed)
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - dupl
-        - goconst
-        - mirror
-        - ireturn
-    - path: "internal/data/*"
-      linters:
-        - forcetypeassert
-    - path: ".*/mocks/.*"
-      linters:
-        - forcetypeassert
-        - inamedparam
 linters:
-  disable-all: true
+  default: none
   enable:
-    - dupl
-    - errcheck
-    - copyloopvar
-    - goconst
-    - gocyclo
-    - gofmt
-    - goimports
-    - gosimple
-    - govet
-    - ineffassign
-    - misspell
-    - nakedret
-    # - prealloc
-    - revive
-    - staticcheck
-    - typecheck
-    - unconvert
-    - unparam
-    - unused
     - asasalint
     - asciicheck
     - bidichk
@@ -51,52 +11,86 @@ linters:
     - canonicalheader
     - containedctx
     - contextcheck
+    - copyloopvar
     - decorder
     - dogsled
+    - dupl
     - dupword
     - durationcheck
+    - errcheck
     - errchkjson
     - errname
-    # - errorlint
     - fatcontext
     - forbidigo
     - forcetypeassert
-    # - funlen
     - gochecksumtype
-    # - gocritic
+    - goconst
+    - gocyclo
     - goprintffuncname
     - gosmopolitan
+    - govet
     - grouper
     - importas
     - inamedparam
+    - ineffassign
     - intrange
+    - ireturn
     - loggercheck
     - makezero
     - mirror
-    # - mnd
+    - misspell
     - musttag
-    # - nestif
+    - nakedret
     - nilerr
     - nilnil
     - noctx
-    # - paralleltest
-    # - perfsprint
     - predeclared
     - reassign
+    - revive
     - spancheck
+    - staticcheck
     - tagalign
     - tagliatelle
-    # - testifylint
     - testpackage
     - thelper
     - tparallel
+    - unconvert
+    - unparam
+    - unused
     - usestdlibvars
     - wastedassign
     - whitespace
-    # - wrapcheck
-    - ireturn
-
-linters-settings:
-  revive:
+  settings:
+    revive:
+      rules:
+        - name: comment-spacings
+  exclusions:
+    generated: lax
     rules:
-      - name: comment-spacings
+      - linters:
+          - dupl
+          - goconst
+          - ireturn
+          - mirror
+        path: _test\.go
+      - linters:
+          - forcetypeassert
+        path: internal/data/*
+      - linters:
+          - forcetypeassert
+          - inamedparam
+        path: .*/mocks/.*
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

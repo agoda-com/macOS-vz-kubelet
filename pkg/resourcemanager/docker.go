@@ -21,6 +21,7 @@ import (
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	registrytypes "github.com/docker/docker/api/types/registry"
 	dockercl "github.com/moby/moby/client"
 	"github.com/moby/moby/pkg/stdcopy"
 
@@ -132,7 +133,7 @@ func (c *DockerClient) handleDockerContainerCreation(ctx context.Context, params
 	case corev1.PullIfNotPresent:
 		c.eventRecorder.PullingImage(ctx, params.Image, params.Name)
 		startTime := time.Now()
-		err = c.pullImage(ctx, params.Image, params.Name)
+		err = c.pullImage(ctx, params.Image, params.Name, params.RegistryCreds)
 		if err != nil {
 			c.eventRecorder.BackOffPullImage(ctx, params.Image, params.Name, err)
 			return
@@ -175,7 +176,7 @@ func (c *DockerClient) handleDockerContainerCreation(ctx context.Context, params
 }
 
 // pullImage pulls the specified Docker image.
-func (c *DockerClient) pullImage(ctx context.Context, ref string, containerName string) (err error) {
+func (c *DockerClient) pullImage(ctx context.Context, ref string, containerName string, creds resource.RegistryCredentials) (err error) {
 	ctx, span := trace.StartSpan(ctx, "DockerClient.pullImage")
 	ctx = span.WithFields(ctx, log.Fields{
 		"image":         ref,
@@ -186,6 +187,11 @@ func (c *DockerClient) pullImage(ctx context.Context, ref string, containerName 
 		span.End()
 	}()
 
+	authHeader, encodeErr := encodeRegistryAuth(creds)
+	if encodeErr != nil {
+		return fmt.Errorf("failed to encode registry auth: %w", encodeErr)
+	}
+
 	err = wait.ExponentialBackoffWithContext(ctx, wait.Backoff{
 		Duration: DefaultMinRetryDelay, // Base delay to start with
 		Factor:   DefaultFactor,        // Factor to increase the delay between retries
@@ -193,7 +199,9 @@ func (c *DockerClient) pullImage(ctx context.Context, ref string, containerName 
 		Steps:    DefaultMaxAttempts,   // Maximum number of retry attempts
 		Cap:      DefaultMaxDelay,      // Maximum delay between retries
 	}, func(ctx context.Context) (done bool, _ error) { // never use condition error
-		reader, err := c.client.ImagePull(ctx, ref, image.PullOptions{})
+		reader, err := c.client.ImagePull(ctx, ref, image.PullOptions{
+			RegistryAuth: authHeader,
+		})
 		if err != nil {
 			c.eventRecorder.FailedToPullImage(ctx, ref, containerName, err)
 			return err == nil, nil
@@ -213,6 +221,19 @@ func (c *DockerClient) pullImage(ctx context.Context, ref string, containerName 
 	})
 
 	return err
+}
+
+func encodeRegistryAuth(creds resource.RegistryCredentials) (string, error) {
+	if creds.IsEmpty() {
+		return "", nil
+	}
+
+	authConfig := registrytypes.AuthConfig{
+		Username:      creds.Username,
+		Password:      creds.Password,
+		ServerAddress: creds.Server,
+	}
+	return registrytypes.EncodeAuthConfig(authConfig)
 }
 
 // execPostStartAction executes a post-start action in the specified container.

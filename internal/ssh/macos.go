@@ -51,14 +51,14 @@ func (s *MacOSSession) ExecuteCommand(ctx context.Context, env []corev1.EnvVar, 
 	// Attempt to build exec command string, if successful, start the session
 	// Otherwise, start a shell session and write the command to the stdinPipe
 	if cmdStr, err := utils.BuildExecCommandString(cmd, env); err == nil {
-		if err := s.Session.Start(cmdStr); err != nil {
+		if err := s.Start(cmdStr); err != nil {
 			return err
 		}
 	} else {
 		// If TTY is not enabled, start a shell session
 		// and write the command to the stdinPipe
 		// to avoid having to escape special characters
-		if err := s.Session.Shell(); err != nil {
+		if err := s.Shell(); err != nil {
 			return err
 		}
 
@@ -80,7 +80,7 @@ func (s *MacOSSession) ExecuteCommand(ctx context.Context, env []corev1.EnvVar, 
 	}
 
 	if s.attach.TTY() {
-		return s.Session.Wait()
+		return s.Wait()
 	}
 
 	// If TTY is not enabled, copy stdin to stdinPipe in a synchronous manner
@@ -95,7 +95,7 @@ func (s *MacOSSession) ExecuteCommand(ctx context.Context, env []corev1.EnvVar, 
 		log.G(ctx).WithError(err).Warn("Failed to close stdin pipe")
 	}
 
-	return s.Session.Wait()
+	return s.Wait()
 }
 
 // setupTTYSession sets up TTY for the SSH session.

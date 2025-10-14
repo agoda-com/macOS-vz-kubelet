@@ -1,0 +1,31 @@
+# .mockery.yml
+all: false
+force-file-write: true
+formatter: goimports
+log-level: info
+structname: '{{.InterfaceName}}'
+recursive: false
+template: testify
+
+packages:
+  github.com/agoda-com/macOS-vz-kubelet/pkg/resource:
+    interfaces:
+      VirtualMachine:
+    config:
+      dir: pkg/resource/mocks
+      pkgname: mocks
+      filename: virtual_machine.go
+  github.com/agoda-com/macOS-vz-kubelet/pkg/event:
+    interfaces:
+      EventRecorder:
+    config:
+      dir: pkg/event/mocks
+      pkgname: mocks
+      filename: recorder.go
+  github.com/agoda-com/macOS-vz-kubelet/pkg/client:
+    interfaces:
+      VzClientInterface:
+    config:
+      dir: pkg/client/mocks
+      pkgname: mocks
+      filename: client.go

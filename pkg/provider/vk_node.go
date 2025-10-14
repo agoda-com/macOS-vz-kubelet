@@ -60,17 +60,17 @@ func (p *MacOSVZProvider) ConfigureNode(ctx context.Context, n *corev1.Node) err
 	n.Status.NodeInfo.OperatingSystem = hostInfo.Platform
 	n.Status.NodeInfo.Architecture = hostInfo.KernelArch
 
-	n.ObjectMeta.Labels[corev1.LabelNodeExcludeBalancers] = "true"
+	n.Labels[corev1.LabelNodeExcludeBalancers] = "true"
 
 	// report both old and new styles of OS and arch information
 	os := strings.ToLower(hostInfo.Platform)
-	n.ObjectMeta.Labels[corev1.LabelOSStable] = os
-	n.ObjectMeta.Labels[corev1.LabelArchStable] = hostInfo.KernelArch
+	n.Labels[corev1.LabelOSStable] = os
+	n.Labels[corev1.LabelArchStable] = hostInfo.KernelArch
 
 	// assign cpu model label if available
 	c, err := cpu.InfoWithContext(ctx)
 	if err == nil && len(c) > 0 {
-		n.ObjectMeta.Labels[LabelCPUModelName] = utils.SanitizeAppleCPUModelForK8sLabel(c[0].ModelName)
+		n.Labels[LabelCPUModelName] = utils.SanitizeAppleCPUModelForK8sLabel(c[0].ModelName)
 	} else {
 		log.G(ctx).WithError(err).Warn("Error getting cpu information, skipping cpu model label")
 	}
