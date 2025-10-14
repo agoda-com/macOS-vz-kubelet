@@ -9,8 +9,9 @@ import (
 
 // VirtualMachineData stores the information about macOS virtual machines
 type VirtualMachineData struct {
-	data    sync.Map // map[types.NamespacedName]VirtualMachineInfo (podNamespace/podName -> VirtualMachineInfo)
-	counter int32    // number of virtual machines stored
+	data                  sync.Map // map[types.NamespacedName]VirtualMachineInfo (podNamespace/podName -> VirtualMachineInfo)
+	storedCounter         int32    // number of virtual machines stored
+	allocatedToRunCounter int32    // number of virtual machines allocated to run
 }
 
 // GetVirtualMachineInfo retrieves the VirtualMachineInfo for a specific pod.
@@ -44,7 +45,7 @@ func (d *VirtualMachineData) GetOrCreateVirtualMachineInfo(podNamespace, podName
 	key := types.NamespacedName{Namespace: podNamespace, Name: podName}
 	val, loaded := d.data.LoadOrStore(key, &info)
 	if !loaded {
-		d.incrementCounter()
+		d.incrementStoredCounter()
 	}
 	return *val.(*VirtualMachineInfo), loaded
 }
@@ -54,7 +55,7 @@ func (d *VirtualMachineData) RemoveVirtualMachineInfo(podNamespace, podName stri
 	key := types.NamespacedName{Namespace: podNamespace, Name: podName}
 	_, loaded := d.data.LoadAndDelete(key)
 	if loaded {
-		d.decrementCounter()
+		d.decrementStoredCounter()
 	}
 }
 
@@ -68,18 +69,34 @@ func (d *VirtualMachineData) ListVirtualMachines() map[types.NamespacedName]Virt
 	return vmMap
 }
 
-// Count returns the number of virtual machines stored.
+// StoredCount returns the number of virtual machines stored.
 // It is safe to call concurrently.
-func (d *VirtualMachineData) Count() int32 {
-	return atomic.LoadInt32(&d.counter)
+func (d *VirtualMachineData) StoredCount() int32 {
+	return atomic.LoadInt32(&d.storedCounter)
 }
 
-// incrementCounter increments the number of virtual machines stored.
-func (d *VirtualMachineData) incrementCounter() {
-	atomic.AddInt32(&d.counter, 1)
+// incrementStoredCounter increments the number of virtual machines stored.
+func (d *VirtualMachineData) incrementStoredCounter() {
+	atomic.AddInt32(&d.storedCounter, 1)
 }
 
-// decrementCounter decrements the number of virtual machines stored.
-func (d *VirtualMachineData) decrementCounter() {
-	atomic.AddInt32(&d.counter, -1)
+// decrementStoredCounter decrements the number of virtual machines stored.
+func (d *VirtualMachineData) decrementStoredCounter() {
+	atomic.AddInt32(&d.storedCounter, -1)
+}
+
+// AllocatedToRunCount returns the number of virtual machines allocated to run.
+// It is safe to call concurrently.
+func (d *VirtualMachineData) AllocatedToRunCount() int32 {
+	return atomic.LoadInt32(&d.allocatedToRunCounter)
+}
+
+// IncrementAllocatedToRunCounter increments the number of virtual machines allocated to run.
+func (d *VirtualMachineData) IncrementAllocatedToRunCounter() {
+	atomic.AddInt32(&d.allocatedToRunCounter, 1)
+}
+
+// DecrementAllocatedToRunCounter decrements the number of virtual machines allocated to run.
+func (d *VirtualMachineData) DecrementAllocatedToRunCounter() {
+	atomic.AddInt32(&d.allocatedToRunCounter, -1)
 }

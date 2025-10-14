@@ -146,9 +146,12 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 		return
 	}
 
+	c.data.IncrementAllocatedToRunCounter()
+
 	// Create the virtual machine instance
 	vm, err := c.createVirtualMachineInstance(ctx, cfg, params)
 	if err != nil {
+		c.data.DecrementAllocatedToRunCounter()
 		return
 	}
 
@@ -156,8 +159,10 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 	err = vm.Start(ctx)
 	if err != nil {
 		c.eventRecorder.FailedToStartContainer(ctx, params.ContainerName, err)
+		c.data.DecrementAllocatedToRunCounter()
 		return
 	}
+
 	c.eventRecorder.StartedContainer(ctx, params.ContainerName)
 
 	if params.PostStartAction == nil {
@@ -277,6 +282,9 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 
 	if instance := info.Resource.Instance(); instance != nil {
 		err = c.stopVirtualMachine(ctx, instance, namespace, name, gracePeriod)
+		if err == nil {
+			c.data.DecrementAllocatedToRunCounter()
+		}
 	}
 
 	return err
@@ -559,7 +567,7 @@ func (c *MacOSClient) getVirtualMachineInfo(ctx context.Context, namespace, name
 // It checks whether the current number of added virtual machines has not exceeded the limit.
 func (c *MacOSClient) canProceedWithVirtualMachineCreation() bool {
 	// the check happens when new VM info is added
-	return c.data.Count() <= MaxVirtualMachines
+	return c.data.AllocatedToRunCount() < MaxVirtualMachines
 }
 
 // setupVM creates a new virtual machine instance with the given parameters.
