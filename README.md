@@ -1,299 +1,369 @@
-# macOS Virtualization Kubelet - Run native macOS workloads on Kubernetes
-
-`macOS-vz-kubelet` bridges the worlds of Kubernetes and native macOS workloads. It enables macOS hosts to act as Kubernetes nodes, allowing you to deploy and manage macOS Virtual Machines at scale. The project also supports running Docker containers alongside macOS VMs within the same Pod, providing flexibility for hybrid workloads.
-
-See [examples](example) directory for pod manifests, such as a [macOS VM pod](example/pod.yml) and a [hybrid pod with macOS VM and Docker side-car container](example/pod-gitlab-sidecar.yml).
-
-## Introduction
-
-`macOS-vz-kubelet` integrates native macOS workloads into Kubernetes by leveraging Apple's [Virtualization framework](https://developer.apple.com/documentation/virtualization) and the [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) project. Unlike traditional solutions that rely on QEMU/KVM under Linux, which struggle to fully utilize Apple Silicon's performance, `macOS-vz-kubelet` enables macOS hosts to operate as Kubernetes nodes with near-native performance.
-
-This project is designed to:
-
-- Run macOS Virtual Machines as first-class citizens in a Kubernetes cluster.
-
-- Support hybrid Pods that combine macOS VMs with side-car containers.
-
-- Streamline VM image management with a custom OCI-compliant format.
-
-- Provide Kubernetes integration for scheduling and resource management.
-
-`macOS-vz-kubelet` is an ideal solution for teams looking to scale macOS workloads, such as CI/CD pipelines or testing environments, while maintaining compatibility with Kubernetes' extensive feature set. For a detailed list of supported and unsupported features, see the [Feature Overview](#feature-overview).
-
-## How It Works
-
-`macOS-vz-kubelet` transforms macOS hosts into Kubernetes nodes by utilizing Apple’s Virtualization framework and acting as a Virtual Kubelet provider. This allows Kubernetes to orchestrate native macOS workloads with near-native performance, alongside optional Docker-based containers for hybrid workloads.
-
-### Key Components
-
-1. **Virtualization Framework**
-
-   Apple’s Virtualization framework provisions and manages macOS Virtual Machines (VMs) natively. This ensures optimal performance by directly leveraging Apple Silicon hardware.
-
-1. **Custom OCI Format for VM Images**
-
-   The project introduces a custom OCI-compliant image format to manage VM images efficiently. Images are created with Virtualization.framework compliant tools and distributed using our forked ORAS CLI ([oras-macos-vz](https://github.com/agoda-com/oras-macos-vz)) tailored for this project.
-
-1. **Hybrid Runtime Pods**
-
-   Each Pod’s first container is always a macOS VM.
-Side-car containers, managed by the Docker runtime, can complement the VM for tasks like logging, monitoring, or artifact management.
-
-1. **Networking**
-
-   Networking is managed automatically by macOS-vz-kubelet, with support for both local NAT mode and bridged networking for more complex setups. See [Networking](#networking) section for more detailed explanation.
-
-1. **Resource and Lifecycle Management**
-
-   Resource requests (CPU, memory) are supported for macOS VMs.
-
-   Pod lifecycle events like creation and deletion are fully supported, while updates require pod recreation.
-
-### Workflow
-
-1. A Kubernetes Pod manifest specifies the VM image in the custom OCI format.
-
-1. The Virtual Kubelet retrieves the image from the OCI registry.
-
-1. The Virtualization framework provisions the macOS VM. Optional side-car Docker containers are started alongside.
-
-1. The Virtual Kubelet updates the Kubernetes control plane with the Pod’s status, IPs, and lifecycle events.
-
-For detailed steps on setting up and running workloads, see the [Usage Guide](#usage-guide).
-
-## Networking
-
-Networking in `macOS-vz-kubelet` can operate in two modes, depending on workload requirements:
-
-1. NAT Mode (Default)
-
-   - VMs are assigned local IP addresses via NAT.
-
-   - Suitable for most use cases where external IP access is unnecessary.
-
-   - Interaction with the VM is managed through kubectl exec, which uses SSH under the hood to connect locally.
-
-1. Bridged Networking
-
-   - Enables remote IP access by connecting VMs to tagged VLANs via DHCP.
-
-   - Custom MAC addresses are assigned to each VM interface to ensure IP tracking.
-
-   - IPs are dynamically retrieved by the `macOS-vz-kubelet` using tools like tcpdump and reported back to Kubernetes.
-
-For Bridged Networking VMNet and VM Networking capabilities are required. These 2 capabilities require Apple's approval. Follow [this Apple Forum thread](https://developer.apple.com/forums/thread/656411) on how to request it. After that just pass desired network interface name to `VZ_BRIDGE_INTERFACE` environment variable.
-
-Afterwards, simply generate yourself Mac Development certificate, App ID with those capabilities, and provision profile. Input those in Makefile and enjoy.
-
-## Imaging
-
-As mentioned before, the project introduces a custom OCI-compliant image format to manage VM images efficiently. See [Setup Workflow](#setup-workflow) for detailed steps on creating and pushing VM images to the registry. You can also check [OCI manifest example](example/oci_manifest.json) of our format.
-
-Below are some key points about the imaging process.
-
-### Compression
-
-We we are running compression during the image packaging into OCI. The reason for that is quite simple. On average, our current macOS images are way above ~55 Gigabytes with tools like Xcode and simulators pre-installed. While we don't have to update them often, we still prefer to downsize them as much as possible before being able to distribute them. Using our own OCI content store implementation with custom compression, we can maintain our images on average at the ~35-gigabyte mark in our company's registry.
-
-### Copy-on-Write (COW)
-
-Each host can run two Virtual Machines (Pods) simultaneously (this number is a limitation of Virtualization framework). To avoid conflicts and ensure scalability we use a [copy-on-write (COW)](https://github.com/apple/darwin-xnu/blob/main/bsd/sys/clonefile.h) mechanism to create overlays of the disk image for each Pod. VMs on the same host can share the base image while maintaining their independent state through overlay files.
-
-### Digest validation
-
-We maintain a calculated digest for local image files to guarantee the correctness and integrity of VM images. The process is as follows:
-
-- When a VM image is first downloaded from the remote OCI registry, a digest is generated for the .img file.
-
-- Each time a Pod starts, the calculated digest is compared to the recorded digest from the remote store.
-
-- If the digest is missing or if the .img file is newer than the digest file, it indicates that the local cache is invalid, and the image is re-downloaded from the remote OCI registry.
-
-## Feature Overview
-
-`macOS-vz-kubelet` supports the following Kubernetes features. Features not listed below are currently unsupported.
-
-### Node
-
-| Feature                                  | Supported | Comments           |
-|------------------------------------------|:---------:|--------------------|
-| **Node addresses**                       | ✅        |                    |
-| **Node capacity**                        | ✅        |                    |
-| **Node daemon endpoints**                | ✅        |                    |
-| **Operating system**                     | ✅        | Darwin macOS only. |
-
-### Pod
-
-| Feature                                  | Supported | Comments                                                                                                                                           |
-|------------------------------------------|:---------:|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Create and delete pods**               | ✅        |                                                                                                                                                    |
-| **Update pods**                          | ❌        | Recreate the pod instead.                                                                                                                          |
-| **Get pod, pods and pod status**         | ✅        |                                                                                                                                                    |
-| **Security policies**                    | ❌        |                                                                                                                                                    |
-| **Init containers**                      | ❌        | On the short list.                                                                                                                                 |
-| **Regular containers**                   | ✅        | Supported using docker client. First container on the pod must always be macOS VM, every next one is supported as a regular (docker) container.    |
-
-### Containers
-
-| Feature                                  | Supported | Comments                                                                                                                                                                                                          |
-|------------------------------------------|:---------:|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Container logs**                       | ⚠️         | Only for docker containers.                                                                                                                                                                                       |
-| **Container exec**                       | ✅        | `VZ_SSH_USER` must be set along with either `VZ_SSH_PRIVATE_KEY_BASE64` / `VZ_SSH_PRIVATE_KEY_PATH` or `VZ_SSH_PASSWORD`. These must correspond to the macOS VM SSH credentials. Exec into the regular container works by default. |
-| **Container attach**                     | ⚠️         | Supported, but not tested.                                                                                                                                                                                        |
-| **Container metrics**                    | ❌        |                                                                                                                                                                                                                   |
-| **Resource requests**                    | ⚠️         | MacOS VMs are created with these resource definitions. Docker containers do not support this feature.                                                                                                             |
-| **Resource limits**                      | ❌        | Generally ignored due to VM nature.                                                                                                                                                                               |
-| **Health checks (liveness, readiness)**  | ❌        |                                                                                                                                                                                                                   |
-
-### Storage
-
-| Feature                                  | Supported | Comments                                                                                                                                                                                                          |
-|------------------------------------------|:---------:|--------------------------------------------|
-| **Host volumes**                         | ✅        |                                            |
-| **Empty dir volumes**                    | ✅        |                                            |
-| **Persistent volumes**                   | ❌        | Unsupported by virtual kubelet in general. |
-| **Config maps volumes**                  | ❌        | On the short list.                         |
-| **Secrets volumes**                      | ❌        | On the short list.                         |
-| **Projected volumes**                    | ⚠️         | See the table below.                       |
-
-A [projected volumes](https://kubernetes.io/docs/concepts/storage/projected-volumes) map several existing volume sources into the same directory.
-
-By default, Kubernetes adds a projected volume mount with a service account token, api server key and namespace name that can be used to call k8s API server from the containers in the pod.
-
-| Feature                   | Supported | Comments                                                         |
-|---------------------------|:---------:|------------------------------------------------------------------|
-| **secret**                | ✅        |                                                                  |
-| **downwardAPI**           | ⚠️         | `metadata.namespace` only.                                       |
-| **configMap**             | ✅        |                                                                  |
-| **serviceAccountToken**   | ⚠️         | Supported without rotation. Expires in 3607 seconds by default.  |
-| **clusterTrustBundle**    | ❌        |                                                                  |
-
-### Image pull secrets
-
-macOS-vz-kubelet resolves registry credentials from Pod `spec.imagePullSecrets` and from the Pod's ServiceAccount
-`imagePullSecrets` (same namespace).
-
-Supported secret types:
-- `kubernetes.io/dockerconfigjson` (preferred)
-- `kubernetes.io/dockercfg` (legacy)
-
-For `dockerconfigjson`, the secret must include `.dockerconfigjson` data. For `dockercfg`, it must include
-`.dockercfg` data. Secrets of other types are ignored with a warning event/log. Missing or invalid referenced
-secrets fail pod creation.
-
-## Usage Guide
-
-To start using the project in your Kubernetes cluster, build and launch the project on your macOS host using the flags and environment variables described below. Don't forget to sign your binary with a necessary Virtualization.framework entitlements:
+# macOS Virtualization Kubelet
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Apple%20Silicon-lightgrey.svg)
+
+**Run native macOS virtual machines as Kubernetes pods.**
+
+`macOS-vz-kubelet` is a [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) provider that
+turns an Apple Silicon Mac into a Kubernetes node. Each pod's first container boots as a native macOS VM on
+Apple's [Virtualization framework](https://developer.apple.com/documentation/virtualization); optional Docker
+side-car containers run in the same pod for logging, monitoring, or artifact handling.
+
+It targets teams scaling macOS CI/CD (GitLab runners, build and test farms) on a cluster, at near-native Apple
+Silicon performance and without QEMU/KVM.
+
+## Contents
+
+- [Overview](#overview)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Getting started](#getting-started)
+- [Networking](#networking)
+- [Imaging](#imaging)
+- [Feature overview](#feature-overview)
+- [Configuration](#configuration)
+- [Examples](#examples)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [Related projects](#related-projects)
+- [License](#license)
+
+## Overview
+
+Running macOS under Kubernetes traditionally means QEMU/KVM on Linux, which cannot fully use Apple Silicon
+hardware. `macOS-vz-kubelet` instead runs VMs natively through Virtualization.framework on the Mac itself, so
+guests run at near-native speed.
+
+The project is designed to:
+
+- Run macOS VMs as first-class pods in a Kubernetes cluster.
+- Support hybrid pods that combine a macOS VM with Docker side-car containers.
+- Manage VM images with a custom, compressed, OCI-compliant format.
+- Integrate with Kubernetes scheduling, resource requests, and lifecycle.
+
+For exactly what is and is not supported, see the [Feature overview](#feature-overview).
+
+## How it works
+
+The kubelet runs on the Mac host as a Virtual Kubelet provider and orchestrates two backends from one pod
+spec.
+
+- **Virtualization framework** provisions and runs the macOS VM (pod container index 0), directly on Apple
+  Silicon.
+- **Custom OCI image format** distributes VM images. Images are built with Virtualization.framework-compatible
+  tooling and pushed/pulled as compressed OCI artifacts; the kubelet pulls them via the
+  [oras-go](https://github.com/oras-project/oras-go) library. Packaging/push uses a dedicated ORAS CLI fork,
+  [oras-macos-vz](https://github.com/agoda-com/oras-macos-vz).
+- **Hybrid pods.** Container 0 is always the macOS VM. Containers 1..N run on the local Docker daemon as
+  regular containers.
+- **Networking** is wired automatically: local NAT by default, or bridged for routable IPs. See
+  [Networking](#networking).
+- **Resource and lifecycle.** CPU/memory requests size the VM. Pod create and delete are supported; updates
+  require recreating the pod.
+
+Typical flow:
+
+1. A pod manifest references a macOS VM image in the custom OCI format.
+2. The kubelet pulls the image from the registry (cached locally, see [Imaging](#imaging)).
+3. The VM boots; any side-car containers start alongside it.
+4. The kubelet reports pod status, IPs, and lifecycle back to the control plane.
+
+## Requirements
+
+- Apple Silicon Mac (M-series). The binary builds for `darwin/arm64` only.
+- A macOS host with Virtualization.framework support.
+- A Kubernetes cluster to join the node to, plus a client certificate and key the kubelet uses to
+  authenticate to the API server.
+- A macOS VM base image in the custom OCI format, pushed to an OCI registry (see [Imaging](#imaging)).
+- SSH enabled inside the VM image. `kubectl exec`/`attach` into the VM, the readiness probe, postStart hooks,
+  and stats all run over SSH.
+- A Docker daemon on the host (for example Colima) if you run side-car containers.
+- Code signing with Virtualization.framework entitlements. Ad-hoc signing is enough for NAT; bridged
+  networking needs Apple-approved vmnet entitlements (see [Networking](#networking)).
+
+## Getting started
+
+### Build and sign
+
+Tooling versions are pinned in `.mise.toml` (Go, goreleaser, Ruby). Builds run on macOS and produce a
+`MacOSVK.app` bundle.
+
+```shell
+make snapshot   # local development build
+make release    # signed release build (set RELEASE_CERTIFICATE_NAME, RELEASE_PROVISION_PROFILE_PATH)
+```
+
+The binary needs Virtualization.framework entitlements. To ad-hoc sign a locally built binary:
 
 ```shell
 codesign --entitlements resources/vz.entitlements -s - <YOUR BINARY PATH>
 ```
 
-If you need bridged networking however, vmnet entitlements are required (see `resources/release.entitlement`). Follow the steps in the [Networking](#networking) section on how to request them. After that you can edit Makefile with your configuration and use it to build and sign your custom binary.
+Bridged networking requires the additional vmnet entitlements in `resources/release.entitlements`, which need
+Apple approval. See [Networking](#networking).
 
-See [Setup Workflow](#setup-workflow) on interacting with the project after it successfully connected to the cluster.
+### Run a workload
 
-### Flags
-
-All flags listed below are optional.
-
-| Flag                                              | Type      | Default                           | Description                                                                                           |
-|---------------------------------------------------|-----------|-----------------------------------|-------------------------------------------------------------------------------------------------------|
-| `--nodename`                                      | String    | node hostname                     | The node's name as it will appear in the Kubernetes cluster.                                          |
-| `--startup-timeout`                               | Integer   | `0`                               | The time in seconds to wait for the virtual kubelet to start.                                         |
-| `--disable-taint`                                 | Bool      | `false`                           | Disables the taint that the virtual kubelet adds to the node.                                         |
-| `--log-level`                                     | String    | `info`                            | The log level for the virtual kubelet.                                                                |
-| `--pod-sync-workers`                              | Integer   | `10`                              | The number of workers to use for pod synchronization.                                                 |
-| `--full-resync-period`                            | Integer   | `60`                              | The time in seconds between the node's full resyncs.                                                  |
-| `--client-verify-ca`                              | String    | `APISERVER_CA_CERT_LOCATION` env  | The path to a CA certificate file to use to verify the Kubernetes API server's serving certificate.   |
-| `--no-verify-clients`                             | Bool      | `false`                           | Turns off client verification of the Kubernetes API server's serving certificate.                     |
-| `--authentication-token-webhook`                  | Bool      | `false`                           | Whether to use the TokenReview API to determine authentication for bearer tokens.                     |
-| `--authentication-token-webhook-cache-ttl`        | Integer   | `0`                               | The duration to cache the authentication token webhook response.                                      |
-| `--authorization-webhook-cache-authorized-ttl`    | Integer   | `0`                               | The duration to cache the authorization webhook response for authorized requests.                     |
-| `--authorization-webhook-cache-unauthorized-ttl`  | Integer   | `0`                               | The duration to cache the authorization webhook response for unauthorized requests.                   |
-| `--trace-sample-rate`                             | String    | Always Sample                     | The rate at which to sample traces.                                                                   |
-
-### Environment Variables
-
-| Environment Variable          | Required | Default                        | Description                                                                                                  |
-|-------------------------------|:--------:|--------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `KUBECONFIG`                  |          | `~/.kube/config`               | The path to the kubeconfig file to use.                                                                      |
-| `APISERVER_CERT_LOCATION`     | ✓        |                                | The path to the certificate file to use to authenticate to the Kubernetes API server.                        |
-| `APISERVER_KEY_LOCATION`      | ✓        |                                | The path to the key file to use to authenticate to the Kubernetes API server.                                |
-| `APISERVER_CA_CERT_LOCATION`  |          |                                | The path to a CA certificate file to verify the Kubernetes API server's serving certificate.                 |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` |          | Tracing disabled               | The endpoint to send trace data to.                                                                          |
-| `OTEL_EXPORTER_OTLP_INSECURE` |          | `false`                        | Whether to disable TLS verification when sending trace data.                                                 |
-| `OTEL_SERVICE_NAME`           |          |                                | The name of the service to use when sending trace data.                                                      |
-| `VKUBELET_POD_IP`             |          |                                | The IP address to use for the virtual kubelet pod. Optional settings for debugging purposes.                 |
-| `VZ_BRIDGE_INTERFACE`         |          |                                | The name of the bridge interface to use for the macOS VMs. Requires VMNet and VM Networking capabilities.    |
-| `VZ_SSH_USER`                 | ✓        |                                | The username used when the virtual kubelet attempts to connect to the macOS VM over SSH.                     |
-| `VZ_SSH_PRIVATE_KEY_BASE64`   |          |                                | Base64-encoded SSH private key (PEM), optional. Preferred over password auth when set.                        |
-| `VZ_SSH_PRIVATE_KEY_PATH`     |          |                                | Path to an SSH private key file. Used when `VZ_SSH_PRIVATE_KEY_BASE64` is not set.                             |
-| `VZ_SSH_PRIVATE_KEY_PASSPHRASE` |          |                               | Passphrase for `VZ_SSH_PRIVATE_KEY_BASE64` / `VZ_SSH_PRIVATE_KEY_PATH`.                                        |
-| `VZ_SSH_PASSWORD`             |          |                                | The password used when the virtual kubelet attempts to connect to the macOS VM over SSH (fallback).          |
-| `VZ_SSH_KEX_ALGORITHMS`        |          |                                | Optional comma-separated SSH KEX algorithms to override defaults (advanced troubleshooting).                |
-| `DOCKER_HOST`                 |          | `unix:///var/run/docker.sock`  | The address of the Docker daemon to use for regular container support.                                       |
-
-### Setup Workflow
-
-1. **Create a macOS VM Image**
-
-   Use tools compliant with Apple's Virtualization framework (e.g., [macosvm](https://github.com/s-u/macosvm)) to create a base macOS VM image.
-
-1. **Package the Image**
-
-   Package the VM image into the custom OCI format and push it to the registry using our fork of oras [oras-macos-vz](https://github.com/agoda-com/oras-macos-vz).
+1. **Create a base VM image.** Use a Virtualization.framework-compatible tool such as
+   [macosvm](https://github.com/s-u/macosvm).
+2. **Package and push it** in the custom OCI format with
+   [oras-macos-vz](https://github.com/agoda-com/oras-macos-vz):
 
    ```shell
    oras-macos-vz push -h
    ```
 
-1. **Prepare Kubernetes Pod Manifest**
+3. **Write a pod manifest** that references the OCI image. See [Examples](#examples).
+4. **Run the pod.** The kubelet picks it up, pulls the image, and boots the VM. Status is reported back as for
+   a regular container.
+5. **Interact** with `kubectl exec` (and `attach`) into the VM or any side-car container.
 
-   Write a Kubernetes Pod manifest that references the OCI image. See the [examples](example) folder for a sample manifest.
+Configure the kubelet with the [flags](#command-line-flags) and [environment variables](#environment-variables)
+below.
 
-1. **Run the Pod**
+## Networking
 
-   Virtual Kubelet will pick up your workload, download the image, and start the macOS VM. Status is reported back to Kubernetes as if it’s a regular container.
+Networking runs in one of two modes.
 
-1. **Interact with the Pod**
+### NAT (default)
 
-   Use kubectl exec to interact with the macOS VM or other containers in the Pod.
+- The VM gets a local IP via NAT.
+- Fits most cases where external reachability is unnecessary.
+- `kubectl exec`/`attach` reach the VM over SSH on its local IP. The VM IP is discovered from the host ARP
+  table.
+
+### Bridged
+
+- Gives the VM a routable IP by attaching it to a host network interface (typically a tagged VLAN with DHCP).
+- Each VM interface gets a generated MAC so its lease can be tracked.
+- The kubelet discovers the VM IP by sniffing for that MAC with libpcap (tcpdump-style capture) and reports it
+  to Kubernetes.
+
+Enable bridged mode by setting `VZ_BRIDGE_INTERFACE` to the host interface name. Bridged mode requires the
+VMNet and VM Networking capabilities, which need Apple approval; see this
+[Apple Developer Forums thread](https://developer.apple.com/forums/thread/656411) for how to request them.
+After approval, generate a Mac Development certificate, an App ID with those capabilities, and a provisioning
+profile, then build a release binary signed with `resources/release.entitlements`.
+
+## Imaging
+
+VM images use a custom, OCI-compliant format. See the [OCI manifest example](example/oci_manifest.json).
+
+### Compression
+
+macOS images are large (tens of gigabytes with Xcode and simulators preinstalled). The packaging step
+compresses image layers (parallel gzip) so they store and transfer at a fraction of the raw size, and the
+kubelet decompresses on pull.
+
+### Copy-on-write overlays
+
+A host runs at most two VMs at once (`MaxVirtualMachines`, enforced by a semaphore; a third pod waits for a
+free slot). This reflects a Virtualization.framework limit. To let concurrent VMs share one base image while
+keeping independent state, each pod gets a copy-on-write
+[clone](https://github.com/apple/darwin-xnu/blob/main/bsd/sys/clonefile.h) of the disk and auxiliary storage.
+Overlays are removed when the VM stops; the base image is never mutated.
+
+### Digest validation
+
+Local image files carry a recorded digest to guarantee integrity:
+
+- On first download, a digest is computed and stored alongside the image file.
+- On every pod start, the digest is checked against the expected digest from the registry manifest.
+- If the digest file is missing or is not newer than the image file, the digest is recomputed from the image;
+  a mismatch invalidates the local cache and the image is re-pulled.
+
+## Feature overview
+
+The tables below list supported Kubernetes features. Anything not listed is unsupported.
+
+### Node
+
+| Feature                  | Supported | Comments          |
+|--------------------------|:---------:|-------------------|
+| Node addresses           | ✅        |                   |
+| Node capacity            | ✅        |                   |
+| Node daemon endpoints    | ✅        |                   |
+| Operating system         | ✅        | Darwin macOS only |
+
+### Pod
+
+| Feature                          | Supported | Comments                                                                                              |
+|----------------------------------|:---------:|------------------------------------------------------------------------------------------------------|
+| Create and delete pods           | ✅        |                                                                                                      |
+| Update pods                      | ❌        | Recreate the pod instead.                                                                             |
+| Get pod, pods, and pod status    | ✅        |                                                                                                      |
+| Security policies                | ❌        |                                                                                                      |
+| Init containers                  | ❌        | On the short list.                                                                                   |
+| Regular containers               | ✅        | Container 0 must be the macOS VM; every later container runs on the Docker daemon.                    |
+
+### Containers
+
+| Feature                              | Supported | Comments                                                                                                                          |
+|--------------------------------------|:---------:|----------------------------------------------------------------------------------------------------------------------------------|
+| Container logs                       | ⚠️        | Docker side-cars only.                                                                                                            |
+| Container exec                       | ✅        | VM exec needs `VZ_SSH_USER` plus one of `VZ_SSH_PRIVATE_KEY_BASE64` / `VZ_SSH_PRIVATE_KEY_PATH` / `VZ_SSH_PASSWORD`. Side-car exec works by default. |
+| Container attach                     | ✅        | Docker attach; macOS VM via an interactive SSH shell.                                                                             |
+| Container metrics                    | ✅        | Both backends: macOS VM (CPU and memory) and Docker side-cars.                                                                    |
+| Resource requests                    | ⚠️        | Size the macOS VM. Docker containers ignore them.                                                                                 |
+| Resource limits                      | ❌        | Ignored; VMs are fixed-size.                                                                                                      |
+| Liveness / readiness / startup probes | ❌       | Pod-spec probes are not evaluated. See the readiness note below.                                                                  |
+| Lifecycle hooks (postStart, preStop) | ⚠️        | Exec-shaped hooks only. A successful postStart hook gates pod Ready; preStop runs within the grace period.                        |
+
+**Readiness gating.** Pod-spec probes are not evaluated, but every macOS pod is held NotReady until an internal
+SSH readiness check succeeds (the guest sshd must answer), bounded by `VZ_SSH_READINESS_TIMEOUT`. If a pod
+defines an exec postStart hook, Ready is gated on that hook finishing successfully (bounded by
+`VZ_POSTSTART_TIMEOUT`); a permanently unreachable VM fails the pod rather than hanging.
+
+### Storage
+
+| Feature                  | Supported | Comments                                   |
+|--------------------------|:---------:|--------------------------------------------|
+| Host volumes             | ✅        |                                            |
+| Empty dir volumes        | ✅        | `sizeLimit` is not enforced.               |
+| Persistent volumes       | ❌        | Unsupported by Virtual Kubelet in general. |
+| Config map volumes       | ❌        | On the short list.                         |
+| Secret volumes           | ❌        | On the short list.                         |
+| Projected volumes        | ⚠️        | See below.                                 |
+
+A [projected volume](https://kubernetes.io/docs/concepts/storage/projected-volumes) maps several volume sources
+into one directory. Kubernetes adds one by default carrying the service account token, API server CA, and
+namespace, so a pod can call the API server.
+
+| Source                | Supported | Comments                                                       |
+|-----------------------|:---------:|----------------------------------------------------------------|
+| configMap             | ✅        |                                                                |
+| serviceAccountToken   | ⚠️        | No rotation. Expires per Kubernetes default (~3607s).          |
+| downwardAPI           | ⚠️        | `metadata.namespace` only.                                     |
+| secret                | ❌        | Projected secret sources are not mounted.                      |
+| clusterTrustBundle    | ❌        |                                                                |
+
+### Image pull secrets
+
+The kubelet resolves registry credentials from the pod's `spec.imagePullSecrets` and from the pod
+ServiceAccount's `imagePullSecrets` in the same namespace.
+
+Supported secret types:
+
+- `kubernetes.io/dockerconfigjson` (preferred), requires `.dockerconfigjson` data.
+- `kubernetes.io/dockercfg` (legacy), requires `.dockercfg` data.
+
+Secrets of other types are ignored with a warning event. A referenced secret that is missing or invalid fails
+pod creation.
+
+## Configuration
+
+### Command-line flags
+
+All flags are optional. Duration flags take Go duration strings (for example `30s`, `1m`).
+
+| Flag                                            | Type     | Default                          | Description                                              |
+|-------------------------------------------------|----------|----------------------------------|----------------------------------------------------------|
+| `--nodename`                                    | string   | host name                        | Node name in the cluster.                                |
+| `--provider-id`                                 | string   | (empty)                          | Provider ID reported to the API server.                  |
+| `--startup-timeout`                             | duration | `0`                              | How long to wait for the kubelet to start.               |
+| `--disable-taint`                               | bool     | `false`                          | Disable the node taint.                                  |
+| `--log-level`                                   | string   | `info`                           | Log level.                                               |
+| `--pod-sync-workers`                            | int      | `10`                             | Number of pod synchronization workers.                   |
+| `--full-resync-period`                          | duration | `1m`                             | Interval between full pod resyncs.                        |
+| `--client-verify-ca`                            | string   | `$APISERVER_CA_CERT_LOCATION`    | CA cert used to verify client requests.                  |
+| `--no-verify-clients`                           | bool     | `false`                          | Do not require client certificate validation.            |
+| `--authentication-token-webhook`                | bool     | `false`                          | Use the TokenReview API for bearer-token authentication. |
+| `--authentication-token-webhook-cache-ttl`      | duration | `0`                              | Cache TTL for webhook token authentication responses.    |
+| `--authorization-webhook-cache-authorized-ttl`  | duration | `0`                              | Cache TTL for authorized webhook responses.              |
+| `--authorization-webhook-cache-unauthorized-ttl`| duration | `0`                              | Cache TTL for unauthorized webhook responses.            |
+| `--trace-sample-rate`                           | string   | always sample                    | Trace sampling probability.                              |
+
+Standard klog logging flags are also available under a `--klog.` prefix (for example `--klog.v`).
+
+### Environment variables
+
+#### Kubernetes connection
+
+| Variable                     | Required | Default          | Description                                                       |
+|------------------------------|:--------:|------------------|-------------------------------------------------------------------|
+| `KUBECONFIG`                 |          | `~/.kube/config` | Path to the kubeconfig.                                            |
+| `APISERVER_CERT_LOCATION`    | ✓        |                  | Client cert for authenticating to the API server.                 |
+| `APISERVER_KEY_LOCATION`     | ✓        |                  | Client key for authenticating to the API server.                  |
+| `APISERVER_CA_CERT_LOCATION` |          |                  | CA cert to verify the API server (default for `--client-verify-ca`). |
+| `KUBELET_PORT`               |          | `10250`          | Kubelet API listen port.                                          |
+| `VKUBELET_POD_IP`            |          |                  | Pod IP for the kubelet. For debugging.                            |
+| `VKUBELET_TAINT_KEY`         |          | `virtual-kubelet.io/provider` | Node taint key.                                      |
+| `VKUBELET_TAINT_EFFECT`      |          | `NoSchedule`     | Node taint effect.                                                |
+| `VKUBELET_TAINT_VALUE`       |          | `macos-vz`       | Node taint value.                                                 |
+
+#### macOS VM access (SSH)
+
+Used for `kubectl exec`/`attach` into the VM, the readiness probe, postStart hooks, stats, and graceful
+shutdown. Provide one of the key variables or `VZ_SSH_PASSWORD`.
+
+| Variable                        | Required | Default           | Description                                                                 |
+|---------------------------------|:--------:|-------------------|-----------------------------------------------------------------------------|
+| `VZ_SSH_USER`                   | ✓        |                   | SSH username on the macOS VM.                                               |
+| `VZ_SSH_PRIVATE_KEY_BASE64`     |          |                   | Base64-encoded PEM private key. Preferred when set.                         |
+| `VZ_SSH_PRIVATE_KEY_PATH`       |          |                   | Private key file path. Used when `VZ_SSH_PRIVATE_KEY_BASE64` is unset.      |
+| `VZ_SSH_PRIVATE_KEY_PASSPHRASE` |          |                   | Passphrase for the private key.                                            |
+| `VZ_SSH_PASSWORD`               |          |                   | Password authentication (fallback when no key is set).                      |
+| `VZ_SSH_KEX_ALGORITHMS`         |          | Go SSH defaults   | Comma-separated KEX algorithm override (advanced troubleshooting).          |
+| `VZ_SSH_DIAL_TIMEOUT`           |          | `5s`              | Cap on TCP connect plus SSH handshake. Keeps `exec`/`attach` off an unreachable VM. |
+| `VZ_SSH_READINESS_TIMEOUT`      |          | `60s`             | Overall cap on the post-start SSH readiness loop. On expiry the pod fails.  |
+| `VZ_POSTSTART_TIMEOUT`          |          | `10s`             | Timeout for the postStart hook exec only.                                   |
+| `TERM`                          |          | `xterm-256color`  | Terminal type for interactive `exec`/`attach`.                             |
+
+#### Networking and side-cars
+
+| Variable              | Required | Default                | Description                                                              |
+|-----------------------|:--------:|------------------------|--------------------------------------------------------------------------|
+| `VZ_BRIDGE_INTERFACE` |          | (empty, NAT)           | Host interface for bridged networking. Requires vmnet entitlements.      |
+| `DOCKER_HOST`         |          | Docker SDK auto-detect | Docker daemon address for side-car containers.                           |
+
+#### Tracing (OpenTelemetry)
+
+| Variable                      | Required | Default          | Description                                |
+|-------------------------------|:--------:|------------------|--------------------------------------------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` |          | tracing disabled | OTLP trace endpoint.                       |
+| `OTEL_EXPORTER_OTLP_INSECURE` |          | `false`          | Disable TLS when exporting traces.         |
+| `OTEL_SERVICE_NAME`           |          |                  | Service name reported with traces.         |
 
 ### Local cache
 
-The cache directory will be `~/Library/Caches/com.agoda.fleet.virtualization`. Cache includes OCI images and their digest files and pod mount volumes if you use empty_dir volumes.
+The cache directory is `~/Library/Caches/com.agoda.fleet.virtualization`. It holds OCI images and their digest
+files, plus pod mount volumes when `emptyDir` volumes are used.
 
-## Example Workloads
+## Examples
 
-Check the [examples](example) folder for:
+The [example](example) directory has ready-to-adapt manifests:
 
-- Sample Pod manifests.
-
-- Example workloads, including hybrid Pods with macOS VMs and Docker side-cars.
+- [`pod.yml`](example/pod.yml) - a minimal macOS VM pod.
+- [`pod-gitlab-sidecar.yml`](example/pod-gitlab-sidecar.yml) - a hybrid pod with a macOS VM plus a GitLab
+  Runner Docker side-car.
+- [`deployment.yml`](example/deployment.yml) - a Deployment of macOS VM pods.
+- [`oci_manifest.json`](example/oci_manifest.json) and [`config.json`](example/config.json) - the custom OCI
+  image format.
 
 ## Roadmap
 
-There are currently some features that we need to work on for our open-source release:
+- Higher test coverage, including an open end-to-end testing approach.
+- A public CI/CD pipeline to make contribution easier.
 
-- Higher test coverage including open sourcing end to end testing approach.
+## Contributing
 
-- Have CI/CD pipeline for the open-source project to allow for a easier contribution.
+Issues and contributions are welcome on the
+[GitHub Issues](https://github.com/agoda-com/macOS-vz-kubelet/issues) page. Note that the VM and host packages
+build only on macOS (`darwin/arm64`).
 
-## Community
+## Related projects
 
-If you have any questions or want to contribute to the project, feel free to reach out to us on the [GitHub Issues](https://github.com/agoda-com/macOS-vz-kubelet/issues) page.
+These projects are the foundation `macOS-vz-kubelet` is built on:
 
-### Related projects
-
-The following projects are the bare-bone of macOS-vz-kubelet existence. They are heavily used by this project and are the foundation of the whole idea.
-
-- [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) - Virtual Kubelet is an open source Kubernetes kubelet implementation.
-
-- [Code-Hex/vz](https://github.com/Code-Hex/vz) - Create virtual machines and run Linux-based operating systems in Go using Apple Virtualization.framework.
-
-- [oras-project/oras-go](https://github.com/oras-project/oras-go) - ORAS Go library for utilizing the Open Container Initiative (OCI).
+- [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) - the Kubernetes kubelet
+  implementation this provider plugs into. A [fork](https://github.com/agoda-com/virtual-kubelet) is used (see
+  the `replace` directive in `go.mod`).
+- [Code-Hex/vz](https://github.com/Code-Hex/vz) - Go bindings for Apple Virtualization.framework.
+- [oras-project/oras-go](https://github.com/oras-project/oras-go) - ORAS Go library for OCI artifacts.
+- [oras-macos-vz](https://github.com/agoda-com/oras-macos-vz) - the ORAS CLI fork used to package and push VM
+  images.
 
 ## License
 
-This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for more information.
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

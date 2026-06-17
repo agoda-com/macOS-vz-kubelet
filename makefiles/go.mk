@@ -5,13 +5,13 @@ include makefiles/base.mk
 
 ### Variables
 
-GOLANGCILINT_VERSION ?= v2.5.0
+GOLANGCILINT_VERSION ?= v2.10.1
 GOTESTSUM_VERSION ?= v1.13.0
 GOCOV_VERSION ?= v1.1.0
 GOCOV_HTML_VERSION ?= v1.4.0
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.34
+ENVTEST_K8S_VERSION = 1.35
 
 GOTESTPKG ?= ./...
 
@@ -29,7 +29,7 @@ GOCOVERPKG ?= ./... # Go coverage packages
 # CODECOV_HTMLFILE := build/coverage.html
 
 # gremlins-related variables for mutation test
-GOMUTEST_VERSION ?= v0.5.0
+GOMUTEST_VERSION ?= v0.6.0
 GOMUTESTARGS ?= .
 
 ### Targets

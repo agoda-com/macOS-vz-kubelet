@@ -52,7 +52,7 @@ const (
 type DockerClient struct {
 	client        *dockercl.Client
 	eventRecorder event.EventRecorder
-	data          containerdata.ContainerData
+	containers    containerdata.ContainerData
 }
 
 // NewDockerClient initializes a new ContainerClient for docker containers.
@@ -70,6 +70,7 @@ func NewDockerClient(ctx context.Context, client *dockercl.Client, eventRecorder
 	dockerClient := &DockerClient{
 		client:        client,
 		eventRecorder: eventRecorder,
+		containers:    containerdata.NewContainerData(),
 	}
 
 	containers, err := getActiveContainers(ctx, client)
@@ -96,7 +97,7 @@ func (c *DockerClient) CreateContainer(ctx context.Context, params ContainerPara
 		span.End()
 	}()
 
-	_, loaded := c.data.GetOrCreateContainerInfo(params.PodNamespace, params.PodName, params.Name, containerdata.ContainerInfo{})
+	_, loaded := c.containers.LoadOrStore(params.PodNamespace, params.PodName, params.Name, containerdata.ContainerInfo{})
 	if loaded {
 		return errdefs.AsInvalidInput(fmt.Errorf("container %s already exists", params.Name))
 	}
@@ -116,7 +117,7 @@ func (c *DockerClient) handleDockerContainerCreation(ctx context.Context, params
 		span.SetStatus(err)
 		span.End()
 		if err != nil {
-			c.data.SetContainerInfo(params.PodNamespace, params.PodName, params.Name, containerInfo.WithError(err))
+			c.containers.Store(params.PodNamespace, params.PodName, params.Name, containerInfo.WithError(err))
 		}
 	}()
 	logger := log.G(ctx)
@@ -154,7 +155,7 @@ func (c *DockerClient) handleDockerContainerCreation(ctx context.Context, params
 
 	// Store the container ID for future reference
 	containerInfo = containerInfo.WithID(result.ID)
-	c.data.SetContainerInfo(params.PodNamespace, params.PodName, params.Name, containerInfo)
+	c.containers.Store(params.PodNamespace, params.PodName, params.Name, containerInfo)
 
 	c.eventRecorder.CreatedContainer(ctx, params.Name)
 	err = c.client.ContainerStart(ctx, result.ID, dockercontainer.StartOptions{})
@@ -292,7 +293,7 @@ func (c *DockerClient) RemoveContainers(ctx context.Context, podNs, podName stri
 		span.End()
 	}()
 
-	containerInfoMap, loaded := c.data.RemoveAllContainerInfo(podNs, podName)
+	containerInfoMap, loaded := c.containers.LoadAndDelete(podNs, podName)
 	if !loaded {
 		return errdefs.NotFound("containers not found")
 	}
@@ -320,7 +321,7 @@ func (c *DockerClient) GetContainers(ctx context.Context, podNs, podName string)
 		span.End()
 	}()
 
-	containerInfoMap, ok := c.data.GetAllContainerInfo(podNs, podName)
+	containerInfoMap, ok := c.containers.LoadAll(podNs, podName)
 	if !ok {
 		return nil, errdefs.NotFound("containers not found")
 	}
@@ -333,7 +334,7 @@ func (c *DockerClient) GetContainersListResult(ctx context.Context) (map[k8stype
 	_, span := trace.StartSpan(ctx, "DockerClient.GetContainersListResult")
 	defer span.End()
 
-	containerData := c.data.GetAllData()
+	containerData := c.containers.All()
 	result := make(map[k8stypes.NamespacedName][]resource.Container, len(containerData))
 	for key, containerInfoMap := range containerData {
 		result[key] = c.getContainersWrapped(ctx, containerInfoMap)
@@ -560,7 +561,7 @@ func (c *DockerClient) IsContainerPresent(ctx context.Context, podNs, podName, c
 	_, span := trace.StartSpan(ctx, "DockerClient.IsContainerPresent")
 	defer span.End()
 
-	_, ok := c.data.GetContainerInfo(podNs, podName, containerName)
+	_, ok := c.containers.Load(podNs, podName, containerName)
 	return ok
 }
 
@@ -571,7 +572,7 @@ func (c *DockerClient) GetContainerStats(ctx context.Context, podNs, podName str
 		span.End()
 	}()
 
-	containerInfo, exists := c.data.GetContainerInfo(podNs, podName, containerName)
+	containerInfo, exists := c.containers.Load(podNs, podName, containerName)
 	if !exists {
 		return s, errdefs.NotFound("container not found")
 	}
@@ -582,7 +583,7 @@ func (c *DockerClient) GetContainerStats(ctx context.Context, podNs, podName str
 		return s, fmt.Errorf("failed to get container stats: %w", err)
 	}
 	defer func() {
-		if closeErr := statsResp.Body.Close(); err != nil {
+		if closeErr := statsResp.Body.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("failed to close stats response body: %w", closeErr))
 		}
 	}()
@@ -593,39 +594,69 @@ func (c *DockerClient) GetContainerStats(ctx context.Context, podNs, podName str
 		return s, fmt.Errorf("failed to decode stats: %w", err)
 	}
 
-	// Extract CPU usage in nano cores
-	cpuDelta := statsData.CPUStats.CPUUsage.TotalUsage - statsData.PreCPUStats.CPUUsage.TotalUsage
-	systemDelta := statsData.CPUStats.SystemUsage - statsData.PreCPUStats.SystemUsage
-	var cpuUsageNanoCores *uint64
-	if systemDelta > 0 && len(statsData.CPUStats.CPUUsage.PercpuUsage) > 0 {
-		cpuUsage := uint64(float64(cpuDelta) / float64(systemDelta) * 1e9)
-		cpuUsageNanoCores = &cpuUsage
+	return dockerContainerStats(containerName, statsData, time.Now()), nil
+}
+
+// dockerContainerStats maps a Docker StatsJSON snapshot to a kubelet ContainerStats,
+// normalizing across cgroup v1 and v2 key/field differences.
+func dockerContainerStats(name string, s types.StatsJSON, now time.Time) stats.ContainerStats {
+	t := metav1.NewTime(now)
+
+	coreNanoSeconds := s.CPUStats.CPUUsage.TotalUsage
+
+	cpu := s.CPUStats.CPUUsage.TotalUsage
+	preCPU := s.PreCPUStats.CPUUsage.TotalUsage
+	sys := s.CPUStats.SystemUsage
+	preSys := s.PreCPUStats.SystemUsage
+	// OnlineCPUs authoritative; PercpuUsage cgroup v1-only backstop (gone on v2).
+	onlineCPUs := s.CPUStats.OnlineCPUs
+	if onlineCPUs == 0 {
+		onlineCPUs = uint32(len(s.CPUStats.CPUUsage.PercpuUsage))
+	}
+	var usageNanoCores *uint64
+	// cur>=pre so a cumulative counter reset (container restart) yields nil, not a wrapped
+	// uint64 rate; sys>preSys (strict) avoids div-by-zero and lets an idle cpuDelta==0
+	// report 0 rather than missing (matches Docker CLI / cadvisor).
+	if cpu >= preCPU && sys > preSys && onlineCPUs > 0 {
+		n := uint64(float64(cpu-preCPU) / float64(sys-preSys) * float64(onlineCPUs) * 1e9)
+		usageNanoCores = &n
 	}
 
-	// Extract CPU usage in core nano seconds
-	cpuUsageCoreNanoSeconds := statsData.CPUStats.CPUUsage.TotalUsage
+	usage := s.MemoryStats.Usage
 
-	// Extract memory usage
-	memoryUsageBytes := statsData.MemoryStats.Usage
-	memoryRSSBytes := statsData.MemoryStats.Stats["rss"]
-	memoryWorkingSetBytes := statsData.MemoryStats.Usage - statsData.MemoryStats.Stats["cache"]
+	// anon (v2) / rss (v1) resident set; read-with-ok prevents conflating
+	// absent key with zero on fallback.
+	rss, ok := s.MemoryStats.Stats["anon"]
+	if !ok {
+		rss = s.MemoryStats.Stats["rss"]
+	}
 
-	// Prepare stats.ContainerStats
-	time := metav1.NewTime(time.Now())
+	inactiveFile, ok := s.MemoryStats.Stats["inactive_file"]
+	if !ok {
+		inactiveFile = s.MemoryStats.Stats["total_inactive_file"]
+	}
+	// cadvisor WorkingSet = Usage - inactive_file, clamped at 0 on underflow.
+	ws := usage
+	if usage >= inactiveFile {
+		ws = usage - inactiveFile
+	} else {
+		ws = 0
+	}
+
 	return stats.ContainerStats{
-		Name: containerName,
+		Name: name,
 		CPU: &stats.CPUStats{
-			Time:                 time,
-			UsageNanoCores:       cpuUsageNanoCores,
-			UsageCoreNanoSeconds: &cpuUsageCoreNanoSeconds,
+			Time:                 t,
+			UsageNanoCores:       usageNanoCores,
+			UsageCoreNanoSeconds: &coreNanoSeconds,
 		},
 		Memory: &stats.MemoryStats{
-			Time:            time,
-			UsageBytes:      &memoryUsageBytes,
-			WorkingSetBytes: &memoryWorkingSetBytes,
-			RSSBytes:        &memoryRSSBytes,
+			Time:            t,
+			UsageBytes:      &usage,
+			WorkingSetBytes: &ws,
+			RSSBytes:        &rss,
 		},
-	}, nil
+	}
 }
 
 // getActiveContainers lists all active containers that match the specified name prefix.

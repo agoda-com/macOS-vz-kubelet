@@ -77,7 +77,7 @@ func newProviderFactory(t *testing.T, ctx context.Context, kcl *kubernetes.Clien
 				},
 			),
 		)
-		cachePath := t.TempDir()
+		cachePath := sharedImageCacheDir
 		t.Logf("cachePath: %s", cachePath)
 
 		dockerCl, err := docker.NewClientWithOpts(docker.WithHost(*dockerSocketPath))

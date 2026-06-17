@@ -55,6 +55,11 @@ func ensureLocalRegistry(t *testing.T, dockerCl *docker.Client, username, passwo
 		registryPort  = "5000"
 		labelKey      = "macos.vz.kubelet.e2e.registry"
 		labelValue    = "true"
+		// registry:3 declares VOLUME /var/lib/registry; without a named volume each
+		// container (re)create orphans a fresh anonymous volume holding the multi-GB
+		// macOS image, accreting until the host docker disk fills. A stable named
+		// volume is reused across recreations instead.
+		registryDataVolume = "virtual-kubelet-e2e-registry-data"
 	)
 
 	filtersArgs := filters.NewArgs(filters.Arg("label", fmt.Sprintf("%s=%s", labelKey, labelValue)))
@@ -118,6 +123,11 @@ func ensureLocalRegistry(t *testing.T, dockerCl *docker.Client, username, passwo
 			{
 				Type:   mount.TypeVolume,
 				Target: "/auth",
+			},
+			{
+				Type:   mount.TypeVolume,
+				Source: registryDataVolume,
+				Target: "/var/lib/registry",
 			},
 		},
 	}

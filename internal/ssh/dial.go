@@ -19,6 +19,9 @@ import (
 // connection is complete, an error is returned. Once successfully connected,
 // any expiration of the context will not affect the connection.
 //
+// When config.Timeout > 0 it bounds connect AND handshake as one budget,
+// independent of the (longer) caller ctx (see envcfg.SSHDialTimeout).
+//
 // See [Dial] for additional information.
 func DialContext(ctx context.Context, network, addr string, config *ssh.ClientConfig) (client *ssh.Client, err error) {
 	ctx, span := trace.StartSpan(ctx, "VZSSH.Dial")
@@ -26,6 +29,16 @@ func DialContext(ctx context.Context, network, addr string, config *ssh.ClientCo
 		span.SetStatus(err)
 		span.End()
 	}()
+
+	if config.Timeout > 0 {
+		// Bound connect+handshake as one budget independent of the (longer) caller
+		// ctx: a stalled guest login hangs NewClientConn past the TCP connect, and
+		// only the caller ctx guarded the handshake before. The handshake select on
+		// ctx.Done() below then observes this deadline.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, config.Timeout)
+		defer cancel()
+	}
 
 	d := net.Dialer{
 		Timeout: config.Timeout,
@@ -66,6 +79,9 @@ func DialContext(ctx context.Context, network, addr string, config *ssh.ClientCo
 		return res.client, res.err
 	case <-ctx.Done():
 		err = context.Cause(ctx)
+		// Close the raw conn so a timed-out handshake can't leak it (and the
+		// in-flight NewClientConn goroutine unwinds).
+		_ = conn.Close()
 		hsSpan.SetStatus(err)
 		hsSpan.End()
 		return nil, err

@@ -51,6 +51,14 @@ func (r LogEventRecorder) FailedPostStartHook(ctx context.Context, containerName
 	log.G(ctx).WithError(err).Errorf("Exec lifecycle hook (%s) for Container \"%s\" failed - error: %v", cmdStr, containerName, err)
 }
 
+func (r LogEventRecorder) FailedPostStartProbe(ctx context.Context, containerName string, err error) {
+	// Warn, not Error: the hard failure rides the creation-path err to SetError ->
+	// pod Fails (hook and hookless alike), so this event is the operationally
+	// significant signal, not the failure itself. Mirrors KubeEventRecorder's
+	// EventTypeWarning.
+	log.G(ctx).WithError(err).Warnf("SSH readiness probe for Container \"%s\" failed - error: %v", containerName, err)
+}
+
 func (r LogEventRecorder) FailedPreStopHook(ctx context.Context, containerName string, cmd []string, err error) {
 	cmdStr := fmt.Sprintf("[%s]", strings.Join(cmd, ", "))
 	log.G(ctx).WithError(err).Errorf("Exec lifecycle hook (%s) for Container \"%s\" failed - error: %v", cmdStr, containerName, err)

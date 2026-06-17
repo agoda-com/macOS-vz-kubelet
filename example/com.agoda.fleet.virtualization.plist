@@ -22,8 +22,14 @@
 		<string>fleet-macos-vz</string>
 		<key>VZ_BRIDGE_INTERFACE</key>
 		<string>vlan0</string>
+		<key>VZ_POSTSTART_TIMEOUT</key>
+		<string>10s</string>
+		<key>VZ_SSH_DIAL_TIMEOUT</key>
+		<string>5s</string>
 		<key>VZ_SSH_PASSWORD</key>
 		<string>master</string>
+		<key>VZ_SSH_READINESS_TIMEOUT</key>
+		<string>60s</string>
 		<key>VZ_SSH_USER</key>
 		<string>master</string>
 	</dict>

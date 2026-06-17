@@ -1,23 +1,15 @@
 package resourcemanager
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/Code-Hex/vz/v3"
 	vmdata "github.com/agoda-com/macOS-vz-kubelet/internal/data/vm"
-	vzio "github.com/agoda-com/macOS-vz-kubelet/internal/io"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/node"
-	vzssh "github.com/agoda-com/macOS-vz-kubelet/internal/ssh"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/sshconn"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
@@ -27,12 +19,9 @@ import (
 
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
-	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
-	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -61,7 +50,7 @@ type VirtualMachineParams struct {
 // MacOSClient manages the lifecycle of macOS virtual machines.
 type MacOSClient struct {
 	downloadManager *downloader.Manager
-	data            vmdata.VirtualMachineData
+	vms             vmdata.VirtualMachineData
 
 	eventRecorder              event.EventRecorder
 	networkInterfaceIdentifier string
@@ -82,6 +71,7 @@ func NewMacOSClient(ctx context.Context, eventRecorder event.EventRecorder, netw
 		networkInterfaceIdentifier: networkInterfaceIdentifier,
 		downloadManager:            downloader.NewManager(eventRecorder, cachePath),
 		vmPermits:                  make(chan struct{}, MaxVirtualMachines),
+		vms:                        vmdata.NewVirtualMachineData(),
 	}
 }
 
@@ -93,9 +83,12 @@ func (c *MacOSClient) CreateVirtualMachine(ctx context.Context, params VirtualMa
 		span.End()
 	}()
 
-	_, loaded := c.data.GetOrCreateVirtualMachineInfo(params.Namespace, params.Name, vmdata.VirtualMachineInfo{
+	_, loaded := c.vms.LoadOrStore(params.Namespace, params.Name, vmdata.VirtualMachineInfo{
 		Ref:      params.Image,
 		Resource: resource.NewMacOSVirtualMachine(params.Env),
+		// Persistent SSH connection shared across every exec for this VM; dials
+		// lazily on first NewSession. Closed in DeleteVirtualMachine.
+		SSHConn: sshconn.New(c.sshDialFunc(params.Namespace, params.Name)),
 	})
 	if loaded {
 		return errdefs.AsInvalidInput(fmt.Errorf("virtual machine already exists"))
@@ -123,7 +116,7 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 	// Manage download
 	downloadCtx, cancel := context.WithCancel(ctx) // create a new context to manage the download
 	defer cancel()
-	_, found := c.data.UpdateVirtualMachineInfo(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	_, found := c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		i.DownloadCancelFunc = cancel
 		return i
 	})
@@ -170,20 +163,50 @@ func (c *MacOSClient) handleVirtualMachineCreation(ctx context.Context, params V
 	c.eventRecorder.StartedContainer(ctx, params.ContainerName)
 
 	if params.PostStartAction == nil {
-		// No post-start action specified, return early
+		// Hookless pods gate Ready on the probe too (universal gating, see the mapper
+		// in pkg/provider/virtualizationgroup_to_pod.go buildPodStatus). Assign the
+		// function-level err (no block-scope shadow) so a permanent probe failure rides
+		// the deferred finalizeVirtualMachineInfo to SetError -> State()=Failed -> PodFailed,
+		// letting the controller recreate it - symmetric with the hook path below.
+		if err = c.waitForVirtualMachineSSHReady(ctx, params.Namespace, params.Name); err != nil {
+			// FailedPostStartProbe is the hookless analog of the hook path's
+			// FailedPostStartHook. Suppress it on context.Canceled (pod deleted mid-probe is
+			// normal teardown, not a failure; cf. the download path's guard above).
+			if !errors.Is(err, context.Canceled) {
+				c.eventRecorder.FailedPostStartProbe(ctx, params.ContainerName, err)
+				log.G(ctx).WithError(err).Warn("hookless post-start SSH readiness probe failed; pod fails")
+			}
+			return
+		}
+		c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+			i.Resource.SetPostStartFinishedAt(time.Now())
+			return i
+		})
 		return
 	}
 
 	// Execute the post-start action
 	err = c.execPostStartAction(ctx, params.Namespace, params.Name, *params.PostStartAction)
 	if err != nil {
-		c.eventRecorder.FailedPostStartHook(ctx, params.ContainerName, params.PostStartAction.Command, err)
+		// err propagates via the deferred finalizeVirtualMachineInfo to SetError -> State()=Failed
+		// regardless of the guard below; only the cluster event is suppressed on a mid-hook pod
+		// delete (ctx cancel), a normal teardown not a hook failure (cf. the context.Canceled
+		// guard on the download path above).
+		if !errors.Is(err, context.Canceled) {
+			c.eventRecorder.FailedPostStartHook(ctx, params.ContainerName, params.PostStartAction.Command, err)
+		}
+		return
 	}
+	// Record success so the status mapper flips the macOS container Ready next poll.
+	c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+		i.Resource.SetPostStartFinishedAt(time.Now())
+		return i
+	})
 }
 
 // finalizeVirtualMachineInfo updates the virtual machine info with the final result of the creation process.
 func (c *MacOSClient) finalizeVirtualMachineInfo(ctx context.Context, params VirtualMachineParams, err error) {
-	_, found := c.data.UpdateVirtualMachineInfo(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	_, found := c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		i.DownloadCancelFunc = nil // indicate that download is no longer in progress
 		if err != nil {
 			i.Resource.SetError(err)
@@ -203,39 +226,13 @@ func (c *MacOSClient) createVirtualMachineInstance(ctx context.Context, cfg conf
 		return nil, err
 	}
 
-	c.data.UpdateVirtualMachineInfo(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
+	c.vms.Update(params.Namespace, params.Name, func(i vmdata.VirtualMachineInfo) vmdata.VirtualMachineInfo {
 		i.Resource.SetInstance(vm)
 		return i
 	})
 	c.eventRecorder.CreatedContainer(ctx, params.ContainerName)
 
 	return vm, nil
-}
-
-// execPostStartAction executes the post-start action inside the virtual machine.
-func (c *MacOSClient) execPostStartAction(ctx context.Context, namespace, name string, action resource.ExecAction) (err error) {
-	ctx, span := trace.StartSpan(ctx, "MacOSClient.execPostStart")
-	ctx = span.WithFields(ctx, log.Fields{
-		"namespace": namespace,
-		"name":      name,
-	})
-	defer func() {
-		span.SetStatus(err)
-		span.End()
-	}()
-	logger := log.G(ctx)
-	logger.Debugf("Executing post-start action: %+v", action)
-	logger.Info("Virtual machine is running, executing post-start command")
-
-	ctx, cancel := context.WithTimeout(ctx, action.TimeoutDuration)
-	defer cancel() // Ensure context is cancelled to avoid leaking resources
-
-	err = c.ExecInVirtualMachine(ctx, namespace, name, action.Command, node.DiscardingExecIO())
-	if ctx.Err() != nil {
-		// Ensure context errors are getting priority to be reported
-		return ctx.Err()
-	}
-	return err
 }
 
 // DeleteVirtualMachine stops and deletes the specified virtual machine.
@@ -251,12 +248,15 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 		span.End()
 	}()
 
-	info, ok := c.data.GetVirtualMachineInfo(namespace, name)
+	info, ok := c.vms.Load(namespace, name)
 	if !ok {
 		log.G(ctx).Debugf("virtual machine not found for namespace %s and name %s", namespace, name)
 		return nil
 	}
-	defer c.data.RemoveVirtualMachineInfo(namespace, name)
+
+	// Delete must execute before releasePermit (defers are LIFO).
+	// releasePermit handles the missing-entry case via non-blocking channel drain.
+	defer c.vms.Delete(namespace, name)
 	defer c.releasePermit(ctx, types.NamespacedName{Namespace: namespace, Name: name})
 
 	if info.DownloadCancelFunc != nil {
@@ -265,6 +265,12 @@ func (c *MacOSClient) DeleteVirtualMachine(ctx context.Context, namespace string
 
 	if instance := info.Resource.Instance(); instance != nil {
 		err = c.stopVirtualMachine(ctx, instance, namespace, name, gracePeriod)
+	}
+
+	// Close the persistent SSH connection after stopVirtualMachine (graceful
+	// shutdown SSHes over it).
+	if info.SSHConn != nil {
+		_ = info.SSHConn.Close()
 	}
 
 	return err
@@ -361,7 +367,7 @@ func (c *MacOSClient) GetVirtualMachineListResult(ctx context.Context) (map[type
 
 	vms := make(map[types.NamespacedName]resource.MacOSVirtualMachine)
 
-	infos := c.data.ListVirtualMachines()
+	infos := c.vms.All()
 	// simplify the map down to just the resource
 	for key, info := range infos {
 		vms[key] = info.Resource
@@ -370,186 +376,9 @@ func (c *MacOSClient) GetVirtualMachineListResult(ctx context.Context) (map[type
 	return vms, nil
 }
 
-// ExecInVirtualMachine executes a command inside a specified virtual machine.
-func (c *MacOSClient) ExecInVirtualMachine(ctx context.Context, namespace, name string, cmd []string, attach api.AttachIO) (err error) {
-	ctx, span := trace.StartSpan(ctx, "MacOSClient.ExecInVirtualMachine")
-	defer func() {
-		span.SetStatus(err)
-		span.End()
-	}()
-
-	info, err := c.getVirtualMachineInfo(ctx, namespace, name)
-	if err != nil {
-		return err
-	}
-
-	client, err := establishVirtualMachineSshConn(ctx, info.Resource)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := client.Close(); err != nil {
-			log.G(ctx).WithError(err).Warn("failed to close SSH client")
-		}
-	}()
-
-	go func() {
-		// Make sure connection is closed when context is done
-		<-ctx.Done()
-		_ = client.Close()
-	}()
-
-	_, sessionSpan := trace.StartSpan(ctx, "MacOSClient.SSHNewSession")
-	session, err := client.NewSession()
-	if err != nil {
-		sessionSpan.SetStatus(err)
-		sessionSpan.End()
-		return err
-	}
-	sessionSpan.SetStatus(nil)
-	sessionSpan.End()
-	defer func() {
-		_ = session.Close()
-	}()
-
-	// We establish stdinPipe here instead of directly assigning attach.Stdin() to the session
-	// because we need to monitor any interruptions to stdin in order to properly close the session.
-	// For example, if the interactive terminal is closed without exiting the session, the session
-	// would be left hanging.
-	stdinPipe, err := session.StdinPipe()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = stdinPipe.Close()
-	}()
-
-	macOSSession := vzssh.NewMacOSSession(session, attach, stdinPipe)
-	setupCtx, setupSpan := trace.StartSpan(ctx, "MacOSClient.SSHSetupSessionIO")
-	if err = macOSSession.SetupSessionIO(setupCtx); err != nil {
-		setupSpan.SetStatus(err)
-		setupSpan.End()
-		return fmt.Errorf("failed to setup session IO: %w", err)
-	}
-	setupSpan.SetStatus(nil)
-	setupSpan.End()
-
-	execCtx, execSpan := trace.StartSpan(ctx, "MacOSClient.SSHExecuteCommand")
-	err = macOSSession.ExecuteCommand(execCtx, info.Resource.Env(), cmd)
-	execSpan.SetStatus(err)
-	execSpan.End()
-	return err
-}
-
-// GetVirtualMachineStats retrieves the stats of the specified virtual machine.
-func (c *MacOSClient) GetVirtualMachineStats(ctx context.Context, namespace, name string) (stats.ContainerStats, error) {
-	// Combined script for collecting all required stats
-	cmd := []string{
-		`cpuUsageNanoCores=$(top -l 1 | awk '/CPU usage/ {print ($3+$5)*10000000}' | sed 's/%//g')`,
-		`cpuUsageNanoCores=$(printf "%.0f" "$cpuUsageNanoCores")`,
-
-		`cpuUsageCoreNanoSeconds=$(echo "$(sysctl -n hw.ncpu) * $(( $(date +%s) - $(sysctl -n kern.boottime | awk -F'[ ,]' '{print $4}') )) * 1000000000" | bc -l)`,
-		`cpuUsageCoreNanoSeconds=$(printf "%.0f" "$cpuUsageCoreNanoSeconds")`,
-
-		`memoryUsageBytes=$(vm_stat | awk '/Pages active/ {active=$3} /Pages wired down/ {wired=$4} END {print (active+wired)*4096}')`,
-		`memoryRssBytes=$(vm_stat | awk '/Pages active/ {print $3*4096}')`,
-		`memoryWorkingSetBytes=$(vm_stat | awk '/Pages active/ {active=$3} /Pages speculative/ {speculative=$4} END {print (active-speculative)*4096}')`,
-
-		`echo "{\"cpuUsageNanoCores\": $cpuUsageNanoCores, \"cpuUsageCoreNanoSeconds\": $cpuUsageCoreNanoSeconds, \"memoryUsageBytes\": $memoryUsageBytes, \"memoryRssBytes\": $memoryRssBytes, \"memoryWorkingSetBytes\": $memoryWorkingSetBytes}"`,
-	}
-
-	// Capture command output
-	stdout := &bytes.Buffer{}
-	buf := vzio.NewBufferWriteCloser(stdout)
-	attach := node.NewExecIO(false, nil, buf, buf, nil)
-
-	// Execute the script in the VM
-	if err := c.ExecInVirtualMachine(ctx, namespace, name, cmd, attach); err != nil {
-		return stats.ContainerStats{}, fmt.Errorf("error executing script: %w", err)
-	}
-
-	// Parse JSON output
-	statsData, err := parseStatsJSON(stdout.Bytes())
-	if err != nil {
-		return stats.ContainerStats{}, fmt.Errorf("error parsing JSON output: %w", err)
-	}
-
-	// Prepare stats.ContainerStats
-	time := metav1.NewTime(time.Now())
-	return stats.ContainerStats{
-		CPU: &stats.CPUStats{
-			Time:                 time,
-			UsageNanoCores:       statsData.CPUUsageNanoCores,
-			UsageCoreNanoSeconds: statsData.CPUUsageCoreNanoSeconds,
-		},
-		Memory: &stats.MemoryStats{
-			Time:            time,
-			UsageBytes:      statsData.MemoryUsageBytes,
-			WorkingSetBytes: statsData.MemoryWorkingSetBytes,
-			RSSBytes:        statsData.MemoryRSSBytes,
-		},
-	}, nil
-}
-
-type vmStatsData struct {
-	CPUUsageNanoCores       json.Number `json:"cpuUsageNanoCores"`
-	CPUUsageCoreNanoSeconds json.Number `json:"cpuUsageCoreNanoSeconds"`
-	MemoryUsageBytes        json.Number `json:"memoryUsageBytes"`
-	MemoryRSSBytes          json.Number `json:"memoryRssBytes"`
-	MemoryWorkingSetBytes   json.Number `json:"memoryWorkingSetBytes"`
-}
-
-type parsedVMStatsData struct {
-	CPUUsageNanoCores       *uint64 `json:"cpuUsageNanoCores"`
-	CPUUsageCoreNanoSeconds *uint64 `json:"cpuUsageCoreNanoSeconds"`
-	MemoryUsageBytes        *uint64 `json:"memoryUsageBytes"`
-	MemoryRSSBytes          *uint64 `json:"memoryRssBytes"`
-	MemoryWorkingSetBytes   *uint64 `json:"memoryWorkingSetBytes"`
-}
-
-func parseStatsJSON(data []byte) (*parsedVMStatsData, error) {
-	// Unmarshal into intermediate structure
-	var statsData vmStatsData
-	if err := json.Unmarshal(data, &statsData); err != nil {
-		return nil, err
-	}
-
-	// Conversion function for json.Number to *uint64
-	convert := func(num json.Number) (*uint64, error) {
-		val, err := num.Int64()
-		if err != nil {
-			return nil, err
-		}
-		uval := uint64(val)
-		return &uval, nil
-	}
-
-	// Populate the final ParsedVMStatsData struct
-	parsedData := &parsedVMStatsData{}
-	var err error
-
-	if parsedData.CPUUsageNanoCores, err = convert(statsData.CPUUsageNanoCores); err != nil {
-		return nil, fmt.Errorf("cpuUsageNanoCores: %w", err)
-	}
-	if parsedData.CPUUsageCoreNanoSeconds, err = convert(statsData.CPUUsageCoreNanoSeconds); err != nil {
-		return nil, fmt.Errorf("cpuUsageCoreNanoSeconds: %w", err)
-	}
-	if parsedData.MemoryUsageBytes, err = convert(statsData.MemoryUsageBytes); err != nil {
-		return nil, fmt.Errorf("memoryUsageBytes: %w", err)
-	}
-	if parsedData.MemoryRSSBytes, err = convert(statsData.MemoryRSSBytes); err != nil {
-		return nil, fmt.Errorf("memoryRssBytes: %w", err)
-	}
-	if parsedData.MemoryWorkingSetBytes, err = convert(statsData.MemoryWorkingSetBytes); err != nil {
-		return nil, fmt.Errorf("memoryWorkingSetBytes: %w", err)
-	}
-
-	return parsedData, nil
-}
-
 // getVirtualMachineInfo retrieves the virtual machine information.
 func (c *MacOSClient) getVirtualMachineInfo(ctx context.Context, namespace, name string) (vmdata.VirtualMachineInfo, error) {
-	info, ok := c.data.GetVirtualMachineInfo(namespace, name)
+	info, ok := c.vms.Load(namespace, name)
 	if !ok {
 		log.G(ctx).Debugf("virtual machine not found for namespace %s and name %s", namespace, name)
 		return vmdata.VirtualMachineInfo{}, errdefs.NotFound("virtual machine not found")
@@ -576,85 +405,4 @@ func setupVM(ctx context.Context, cfg config.MacPlatformConfigurationOptions, ui
 	}
 
 	return vmInstance, nil
-}
-
-// establishVirtualMachineSshConn establishes an SSH connection to the specified virtual machine.
-func establishVirtualMachineSshConn(ctx context.Context, vm resource.MacOSVirtualMachine) (*ssh.Client, error) {
-	ipAddr := vm.IPAddress()
-	if ipAddr == "" {
-		return nil, errdefs.InvalidInputf("virtual machine does not have an IP address")
-	}
-
-	// Setup SSH client configuration
-	sshUser, sshAuth, err := getSSHAuthMethods()
-	if err != nil {
-		return nil, err
-	}
-	config := &ssh.ClientConfig{
-		User:            sshUser,
-		Auth:            sshAuth,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-
-	if kexList := strings.TrimSpace(os.Getenv("VZ_SSH_KEX_ALGORITHMS")); kexList != "" {
-		config.KeyExchanges = strings.Split(kexList, ",")
-	}
-
-	conn, err := vzssh.DialContext(ctx, "tcp", vm.IPAddress()+":22", config)
-	if err != nil {
-		return nil, err
-	}
-
-	go vzssh.SendKeepalive(ctx, conn)
-	return conn, nil
-}
-
-// getSSHAuthMethods retrieves SSH auth methods from environment variables.
-func getSSHAuthMethods() (string, []ssh.AuthMethod, error) {
-	sshUser := os.Getenv("VZ_SSH_USER")
-	if sshUser == "" {
-		return "", nil, errdefs.InvalidInputf("VZ_SSH_USER env variable is required")
-	}
-
-	var auth []ssh.AuthMethod
-
-	privateKey := ""
-	if keyBase64 := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_BASE64")); keyBase64 != "" {
-		keyData, err := base64.StdEncoding.DecodeString(keyBase64)
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to decode VZ_SSH_PRIVATE_KEY_BASE64: %v", err)
-		}
-		privateKey = string(keyData)
-	} else if keyPath := strings.TrimSpace(os.Getenv("VZ_SSH_PRIVATE_KEY_PATH")); keyPath != "" {
-		keyData, err := os.ReadFile(keyPath)
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to read VZ_SSH_PRIVATE_KEY_PATH: %v", err)
-		}
-		privateKey = string(keyData)
-	}
-
-	if privateKey != "" {
-		var signer ssh.Signer
-		var err error
-
-		if passphrase := os.Getenv("VZ_SSH_PRIVATE_KEY_PASSPHRASE"); passphrase != "" {
-			signer, err = ssh.ParsePrivateKeyWithPassphrase([]byte(privateKey), []byte(passphrase))
-		} else {
-			signer, err = ssh.ParsePrivateKey([]byte(privateKey))
-		}
-		if err != nil {
-			return "", nil, errdefs.InvalidInputf("failed to parse VZ_SSH_PRIVATE_KEY: %v", err)
-		}
-		auth = append(auth, ssh.PublicKeys(signer))
-	}
-
-	if sshPassword := os.Getenv("VZ_SSH_PASSWORD"); sshPassword != "" {
-		auth = append(auth, ssh.Password(sshPassword))
-	}
-
-	if len(auth) == 0 {
-		return "", nil, errdefs.InvalidInputf("VZ_SSH_PRIVATE_KEY_BASE64, VZ_SSH_PRIVATE_KEY_PATH, or VZ_SSH_PASSWORD env variable is required")
-	}
-
-	return sshUser, auth, nil
 }

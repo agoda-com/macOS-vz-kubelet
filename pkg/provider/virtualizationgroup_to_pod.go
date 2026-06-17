@@ -37,12 +37,25 @@ func (p *MacOSVZProvider) buildPodStatus(_ context.Context, vg *client.Virtualiz
 	podIp := macOSVM.IPAddress()
 	containerStatuses := make([]corev1.ContainerStatus, 0, len(pod.Spec.Containers))
 
+	macOSPostStartSatisfied := true
+	// postStartFinishedAt is the post-start readiness marker's wall-clock: it stamps the
+	// Ready LastTransitionTime, since the gate clears when the SSH probe (plus the exec
+	// hook when one exists) finishes, not at VM start. Nil until the probe sets it,
+	// leaving those timestamps unchanged.
+	var postStartFinishedAt *time.Time
+
 	for i, c := range pod.Spec.Containers {
 		// vz: always assume that first container is macOS container
 		if i == 0 {
 			state := macOSVM.State()
-			started := podIp != "" // TODO: this needs to indicate whether postStart hook has finished
-			ready := state == resource.VirtualMachineStateRunning
+			// Gate readiness on the post-start marker for EVERY macOS container[0], not
+			// just hook pods: it is set when the SSH readiness probe succeeds (hookless
+			// and hook paths both run it), and again when the optional exec hook finishes.
+			// Until then the pod is NotReady/NotStarted even with an IP.
+			postStartFinishedAt = macOSVM.PostStartFinishedAt()
+			macOSPostStartSatisfied = postStartFinishedAt != nil
+			started := podIp != "" && macOSPostStartSatisfied
+			ready := state == resource.VirtualMachineStateRunning && macOSPostStartSatisfied
 
 			if startedAt := macOSVM.StartedAt(); startedAt != nil {
 				firstContainerStartTime = *startedAt
@@ -112,7 +125,7 @@ func (p *MacOSVZProvider) buildPodStatus(_ context.Context, vg *client.Virtualiz
 	}
 	return &corev1.PodStatus{
 		Phase:             getPodPhaseFromVirtualizationGroup(vg),
-		Conditions:        getPodConditionsFromVirtualizationGroup(vg, pod.CreationTimestamp.Time, firstContainerStartTime, lastUpdateTime),
+		Conditions:        getPodConditionsFromVirtualizationGroup(vg, pod.CreationTimestamp.Time, firstContainerStartTime, lastUpdateTime, macOSPostStartSatisfied, postStartFinishedAt),
 		Message:           "",
 		Reason:            "",
 		HostIP:            p.nodeIPAddress,
@@ -330,7 +343,7 @@ func getPodPhaseFromVirtualizationGroup(vg *client.VirtualizationGroup) corev1.P
 }
 
 // getPodConditionsFromVirtualizationGroup determines the pod conditions based on the state of the virtualization group.
-func getPodConditionsFromVirtualizationGroup(vg *client.VirtualizationGroup, podCreationTime, firstContainerStartTime, lastUpdateTime time.Time) []corev1.PodCondition {
+func getPodConditionsFromVirtualizationGroup(vg *client.VirtualizationGroup, podCreationTime, firstContainerStartTime, lastUpdateTime time.Time, macOSPostStartSatisfied bool, postStartFinishedAt *time.Time) []corev1.PodCondition {
 	// Get the macOS VM and group containers
 	macOSVM := vg.MacOSVirtualMachine
 	groupContainers := vg.Containers
@@ -400,6 +413,19 @@ func getPodConditionsFromVirtualizationGroup(vg *client.VirtualizationGroup, pod
 			initializedCondition.Status = corev1.ConditionTrue
 			readyCondition.Status = corev1.ConditionTrue
 		}
+
+		// post-start gates Ready, not Initialized: an unsatisfied post-start gate keeps the pod NotReady.
+		if !macOSPostStartSatisfied {
+			readyCondition.Status = corev1.ConditionFalse
+		}
+	}
+
+	// Stamp the Ready transition with the post-start-finish wall-clock, not the
+	// VM-start-derived lastUpdateTime, so it reflects when the gate cleared.
+	// postStartFinishedAt is nil until the SSH probe (plus optional hook) finishes,
+	// so pods still gating keep their VM-start timestamps.
+	if readyCondition.Status == corev1.ConditionTrue && postStartFinishedAt != nil {
+		readyCondition.LastTransitionTime = metav1.NewTime(*postStartFinishedAt)
 	}
 
 	// Append conditions to the list

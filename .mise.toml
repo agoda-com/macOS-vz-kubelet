@@ -1,3 +1,7 @@
 [tools]
-go = "1.25.6"
-goreleaser = "2.12.5"
+go = "1.26.4"
+goreleaser = "2.16.0"
+ruby = "3.3.11"
+
+[settings]
+ruby.compile = false

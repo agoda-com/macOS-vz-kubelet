@@ -175,6 +175,52 @@ func (_c *VirtualMachine_FinishedAt_Call) RunAndReturn(run func() *time.Time) *V
 	return _c
 }
 
+// PostStartFinishedAt provides a mock function for the type VirtualMachine
+func (_mock *VirtualMachine) PostStartFinishedAt() *time.Time {
+	ret := _mock.Called()
+
+	if len(ret) == 0 {
+		panic("no return value specified for PostStartFinishedAt")
+	}
+
+	var r0 *time.Time
+	if returnFunc, ok := ret.Get(0).(func() *time.Time); ok {
+		r0 = returnFunc()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*time.Time)
+		}
+	}
+	return r0
+}
+
+// VirtualMachine_PostStartFinishedAt_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PostStartFinishedAt'
+type VirtualMachine_PostStartFinishedAt_Call struct {
+	*mock.Call
+}
+
+// PostStartFinishedAt is a helper method to define mock.On call
+func (_e *VirtualMachine_Expecter) PostStartFinishedAt() *VirtualMachine_PostStartFinishedAt_Call {
+	return &VirtualMachine_PostStartFinishedAt_Call{Call: _e.mock.On("PostStartFinishedAt")}
+}
+
+func (_c *VirtualMachine_PostStartFinishedAt_Call) Run(run func()) *VirtualMachine_PostStartFinishedAt_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *VirtualMachine_PostStartFinishedAt_Call) Return(time1 *time.Time) *VirtualMachine_PostStartFinishedAt_Call {
+	_c.Call.Return(time1)
+	return _c
+}
+
+func (_c *VirtualMachine_PostStartFinishedAt_Call) RunAndReturn(run func() *time.Time) *VirtualMachine_PostStartFinishedAt_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // IPAddress provides a mock function for the type VirtualMachine
 func (_mock *VirtualMachine) IPAddress() string {
 	ret := _mock.Called()

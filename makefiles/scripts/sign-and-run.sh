@@ -14,6 +14,9 @@ codesign --entitlements "$SCRIPT_DIR/../../resources/vz.entitlements" -s - "$bin
 # Use sudo to allow access to local network for SSH exec test
 exec sudo --preserve-env=VZ_SSH_USER \
     --preserve-env=VZ_SSH_PRIVATE_KEY_BASE64 \
+    --preserve-env=VZ_SSH_DIAL_TIMEOUT \
+    --preserve-env=VZ_SSH_READINESS_TIMEOUT \
+    --preserve-env=VZ_POSTSTART_TIMEOUT \
     --preserve-env=APISERVER_CA_CERT_LOCATION \
     --preserve-env=APISERVER_CERT_LOCATION \
     --preserve-env=APISERVER_KEY_LOCATION \

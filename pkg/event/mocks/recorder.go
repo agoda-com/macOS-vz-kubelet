@@ -199,6 +199,58 @@ func (_c *EventRecorder_FailedPostStartHook_Call) RunAndReturn(run func(ctx cont
 	return _c
 }
 
+// FailedPostStartProbe provides a mock function for the type EventRecorder
+func (_mock *EventRecorder) FailedPostStartProbe(ctx context.Context, containerName string, err error) {
+	_mock.Called(ctx, containerName, err)
+	return
+}
+
+// EventRecorder_FailedPostStartProbe_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FailedPostStartProbe'
+type EventRecorder_FailedPostStartProbe_Call struct {
+	*mock.Call
+}
+
+// FailedPostStartProbe is a helper method to define mock.On call
+//   - ctx context.Context
+//   - containerName string
+//   - err error
+func (_e *EventRecorder_Expecter) FailedPostStartProbe(ctx interface{}, containerName interface{}, err interface{}) *EventRecorder_FailedPostStartProbe_Call {
+	return &EventRecorder_FailedPostStartProbe_Call{Call: _e.mock.On("FailedPostStartProbe", ctx, containerName, err)}
+}
+
+func (_c *EventRecorder_FailedPostStartProbe_Call) Run(run func(ctx context.Context, containerName string, err error)) *EventRecorder_FailedPostStartProbe_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 error
+		if args[2] != nil {
+			arg2 = args[2].(error)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *EventRecorder_FailedPostStartProbe_Call) Return() *EventRecorder_FailedPostStartProbe_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *EventRecorder_FailedPostStartProbe_Call) RunAndReturn(run func(ctx context.Context, containerName string, err error)) *EventRecorder_FailedPostStartProbe_Call {
+	_c.Run(run)
+	return _c
+}
+
 // FailedPreStopHook provides a mock function for the type EventRecorder
 func (_mock *EventRecorder) FailedPreStopHook(ctx context.Context, containerName string, cmd []string, err error) {
 	_mock.Called(ctx, containerName, cmd, err)

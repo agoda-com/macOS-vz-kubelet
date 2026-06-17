@@ -160,7 +160,7 @@ func TestCreatePod(t *testing.T) {
 			var err error
 
 			// Set up the fake Kubernetes client
-			fakeClient := fake.NewSimpleClientset()
+			fakeClient := fake.NewClientset()
 
 			// Add ConfigMaps to the fake client if present
 			for _, cm := range tc.configMaps {
@@ -208,7 +208,23 @@ func TestCreatePod(t *testing.T) {
 			expectedPod := tc.pod.DeepCopy()
 
 			// Mock Virtualization Client's CreateVirtualizationGroup method
-			vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, tc.expectedToken, tc.expectedConfigMaps, mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
+			vzClient.On("CreateVirtualizationGroup", mock.Anything, expectedPod, tc.expectedToken, mock.MatchedBy(func(configMaps map[string]*corev1.ConfigMap) bool {
+				// Compare ConfigMaps by name and namespace, not by deep equality
+				// (NewClientset adds ManagedFields to objects retrieved via Get)
+				if len(configMaps) != len(tc.expectedConfigMaps) {
+					return false
+				}
+				for name, expectedCM := range tc.expectedConfigMaps {
+					actualCM, ok := configMaps[name]
+					if !ok {
+						return false
+					}
+					if actualCM.Name != expectedCM.Name || actualCM.Namespace != expectedCM.Namespace {
+						return false
+					}
+				}
+				return true
+			}), mock.MatchedBy(func(store resource.RegistryCredentialStore) bool {
 				_, ok := store.ForImage("nginx:latest")
 				return !ok
 			})).Return(nil)
@@ -296,7 +312,7 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fakeClient := fake.NewSimpleClientset()
+			fakeClient := fake.NewClientset()
 
 			_, err := fakeClient.CoreV1().ServiceAccounts("default").Create(ctx, &corev1.ServiceAccount{
 				ObjectMeta:       metav1.ObjectMeta{Name: "default", Namespace: "default"},
@@ -532,7 +548,7 @@ func TestDeletePod(t *testing.T) {
 			vzClient := clientmocks.NewVzClientInterface(t)
 
 			// Set up the fake Kubernetes client and pre-create the pod
-			fakeClient := fake.NewSimpleClientset(tc.pod)
+			fakeClient := fake.NewClientset(tc.pod)
 
 			// Set up the fake event recorder
 			fakeRecorder := record.NewFakeRecorder(1)

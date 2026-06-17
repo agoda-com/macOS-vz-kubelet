@@ -52,13 +52,18 @@ type VirtualMachine interface {
 
 	// FinishedAt returns the finish time of the virtual machine.
 	FinishedAt() *time.Time
+
+	// PostStartFinishedAt returns the postStart hook success time, or nil if not finished
+	// (no hook, still running, or failed).
+	PostStartFinishedAt() *time.Time
 }
 
 // MacOSVirtualMachine represents a macOS virtual machine instance along with its error state.
 type MacOSVirtualMachine struct {
-	env      []corev1.EnvVar            // Environment variables for the virtual machine.
-	instance *vm.VirtualMachineInstance // The underlying virtual machine instance.
-	err      error                      // Error state of the virtual machine.
+	env                 []corev1.EnvVar            // Environment variables for the virtual machine.
+	instance            *vm.VirtualMachineInstance // The underlying virtual machine instance.
+	err                 error                      // Error state of the virtual machine.
+	postStartFinishedAt time.Time                  // set once postStart hook succeeds; zero = not finished
 }
 
 // NewMacOSVirtualMachine creates a new instance of MacOSVirtualMachine.
@@ -144,4 +149,19 @@ func (m *MacOSVirtualMachine) FinishedAt() *time.Time {
 	}
 
 	return m.instance.FinishedAt
+}
+
+// PostStartFinishedAt returns the post-start success time (the SSH readiness probe,
+// plus the exec hook when one exists), or nil if not finished (still running or failed).
+func (m *MacOSVirtualMachine) PostStartFinishedAt() *time.Time {
+	if m.postStartFinishedAt.IsZero() {
+		return nil
+	}
+	return &m.postStartFinishedAt
+}
+
+// SetPostStartFinishedAt records successful post-start completion (the SSH readiness
+// probe, plus the exec hook when one exists).
+func (m *MacOSVirtualMachine) SetPostStartFinishedAt(t time.Time) {
+	m.postStartFinishedAt = t
 }

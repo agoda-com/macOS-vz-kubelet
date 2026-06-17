@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
@@ -35,19 +36,47 @@ func TestGetPodStatus(t *testing.T) {
 		{Name: "container-0", Image: "localhost:5000/macos:latest"},
 		{Name: "container-1", Image: "localhost:5000/sidecar:1.27.1"},
 	}
+	hookExecContainers := []corev1.Container{
+		{Name: "container-0", Image: "localhost:5000/macos:latest", Lifecycle: &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "true"}}}}},
+	}
+	hookHTTPGetContainers := []corev1.Container{
+		{Name: "container-0", Image: "localhost:5000/macos:latest", Lifecycle: &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{HTTPGet: &corev1.HTTPGetAction{Port: intstr.FromInt32(8080)}}}},
+	}
+	hookSleepContainers := []corev1.Container{
+		{Name: "container-0", Image: "localhost:5000/macos:latest", Lifecycle: &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Sleep: &corev1.SleepAction{Seconds: 5}}}},
+	}
+	hookTCPSocketContainers := []corev1.Container{
+		{Name: "container-0", Image: "localhost:5000/macos:latest", Lifecycle: &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8080)}}}},
+	}
+	// sidecarExecHookContainers puts the exec hook on the sidecar (container[1]). The mapper
+	// gates container[0] only, so this hook must NOT gate pod readiness.
+	sidecarExecHookContainers := []corev1.Container{
+		{Name: "container-0", Image: "localhost:5000/macos:latest"},
+		{Name: "container-1", Image: "localhost:5000/sidecar:1.27.1", Lifecycle: &corev1.Lifecycle{PostStart: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "true"}}}}},
+	}
 
 	fakeTime := time.Date(2012, 12, 12, 12, 12, 12, 0, time.UTC)
+	// postStartFinish is the hook-finish wall-clock, minutes after VM start so the golden can
+	// distinguish the Ready stamp (which must track post-start finish) from firstContainerStartTime;
+	// equal times would mask the contract.
+	postStartFinish := fakeTime.Add(5 * time.Minute)
+	// readinessMarker set equal to fakeTime keeps the Ready LastTransitionTime at the VM-start
+	// stamp, so cases that exercise dimensions other than the gate (container states, IP) stay
+	// golden-identical to the pre-universal-gating goldens; the gate is exercised by the
+	// dedicated hookless cases below.
+	readinessMarker := &fakeTime
 
 	tests := []struct {
-		name              string
-		containers        []corev1.Container
-		vmState           resource.VirtualMachineState
-		vmIP              string
-		vmStartedAt       time.Time
-		vmFinishedAt      time.Time
-		vmError           error
-		containerStates   []resource.ContainerState
-		expectForceDelete bool
+		name                  string
+		containers            []corev1.Container
+		vmState               resource.VirtualMachineState
+		vmIP                  string
+		vmStartedAt           time.Time
+		vmFinishedAt          time.Time
+		vmError               error
+		containerStates       []resource.ContainerState
+		expectForceDelete     bool
+		vmPostStartFinishedAt *time.Time
 	}{
 		{
 			name:       "VM preparing/no containers",
@@ -76,17 +105,19 @@ func TestGetPodStatus(t *testing.T) {
 			},
 		},
 		{
-			name:        "VM running/no ip and no containers",
-			containers:  oneContainer,
-			vmState:     resource.VirtualMachineStateRunning,
-			vmStartedAt: fakeTime,
+			name:                  "VM running/no ip and no containers",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
-			name:        "VM running/no containers",
-			containers:  oneContainer,
-			vmState:     resource.VirtualMachineStateRunning,
-			vmIP:        "10.0.0.3",
-			vmStartedAt: fakeTime,
+			name:                  "VM running/no containers",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/no ip and container running",
@@ -96,6 +127,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusRunning, StartedAt: fakeTime.Add(-time.Minute)},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container waiting",
@@ -106,6 +138,9 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusWaiting},
 			},
+			// Orthogonal to the gate (exercises the sidecar state). Marker set so the
+			// macOS container[0] stays satisfied and the golden is unchanged.
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container waiting with error",
@@ -116,6 +151,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusWaiting, Error: assert.AnError.Error()},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container created",
@@ -126,6 +162,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusCreated},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container running",
@@ -136,14 +173,16 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusRunning, StartedAt: fakeTime},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
-			name:            "VM running/container missing in VG",
-			containers:      twoContainers,
-			vmState:         resource.VirtualMachineStateRunning,
-			vmIP:            "10.0.0.3",
-			vmStartedAt:     fakeTime,
-			containerStates: nil, // missing report from virtualization group
+			name:                  "VM running/container missing in VG",
+			containers:            twoContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			containerStates:       nil, // missing report from virtualization group
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container paused",
@@ -154,6 +193,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusPaused},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container restarting",
@@ -164,6 +204,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusRestarting},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container OOMKilled",
@@ -174,7 +215,8 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusOOMKilled, StartedAt: fakeTime.Add(-time.Minute), FinishedAt: fakeTime},
 			},
-			expectForceDelete: true,
+			expectForceDelete:     true,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container dead",
@@ -185,6 +227,7 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusDead, StartedAt: fakeTime.Add(-time.Minute), FinishedAt: fakeTime.Add(time.Minute), ExitCode: 2},
 			},
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM running/container lost",
@@ -195,7 +238,8 @@ func TestGetPodStatus(t *testing.T) {
 			containerStates: []resource.ContainerState{
 				{Status: resource.ContainerStatusUnknown, StartedAt: fakeTime.Add(-time.Minute), FinishedAt: fakeTime, ExitCode: 9},
 			},
-			expectForceDelete: true,
+			expectForceDelete:     true,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
 			name:        "VM terminating/no containers",
@@ -203,33 +247,126 @@ func TestGetPodStatus(t *testing.T) {
 			vmState:     resource.VirtualMachineStateTerminating,
 			vmIP:        "10.0.0.3",
 			vmStartedAt: fakeTime,
+			// Orthogonal to the gate (exercises a terminal VM state). Marker set so
+			// container[0] started stays true and the golden is unchanged.
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
-			name:              "VM terminated/no containers",
-			containers:        oneContainer,
-			vmState:           resource.VirtualMachineStateTerminated,
-			vmIP:              "10.0.0.3",
-			vmStartedAt:       fakeTime,
-			vmFinishedAt:      fakeTime.Add(time.Minute),
-			expectForceDelete: true,
+			name:                  "VM terminated/no containers",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateTerminated,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmFinishedAt:          fakeTime.Add(time.Minute),
+			expectForceDelete:     true,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
-			name:              "VM failed/no containers",
-			containers:        oneContainer,
-			vmState:           resource.VirtualMachineStateFailed,
-			vmIP:              "10.0.0.3",
-			vmStartedAt:       fakeTime,
-			vmFinishedAt:      fakeTime.Add(time.Minute),
-			vmError:           assert.AnError,
-			expectForceDelete: true,
+			name:                  "VM failed/no containers",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateFailed,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmFinishedAt:          fakeTime.Add(time.Minute),
+			vmError:               assert.AnError,
+			expectForceDelete:     true,
+			vmPostStartFinishedAt: readinessMarker,
 		},
 		{
-			name:         "VM lost/no containers",
-			containers:   oneContainer,
-			vmState:      122, // random state that doesn't exist
-			vmIP:         "10.0.0.3",
-			vmStartedAt:  fakeTime,
-			vmFinishedAt: fakeTime.Add(time.Minute),
+			name:                  "VM lost/no containers",
+			containers:            oneContainer,
+			vmState:               122, // random state that doesn't exist
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmFinishedAt:          fakeTime.Add(time.Minute),
+			vmPostStartFinishedAt: readinessMarker,
+		},
+		{
+			name:                  "VM running/postStart pending",
+			containers:            hookExecContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: nil,
+		},
+		{
+			name:                  "VM running/postStart finished",
+			containers:            hookExecContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: &postStartFinish,
+		},
+		{
+			name:                  "VM failed/postStart hook",
+			containers:            hookExecContainers,
+			vmState:               resource.VirtualMachineStateFailed,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmFinishedAt:          fakeTime.Add(time.Minute),
+			vmError:               assert.AnError,
+			vmPostStartFinishedAt: nil,
+			expectForceDelete:     true,
+		},
+		{
+			// HTTPGet/Sleep/TCPSocket are not exec hooks, so they run no hook; the
+			// probe-set marker still gates them like any hookless macOS pod.
+			name:                  "VM running/postStart httpget unsupported",
+			containers:            hookHTTPGetContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: readinessMarker,
+		},
+		{
+			name:                  "VM running/postStart sleep unsupported",
+			containers:            hookSleepContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: readinessMarker,
+		},
+		{
+			name:                  "VM running/postStart tcpsocket unsupported",
+			containers:            hookTCPSocketContainers,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: readinessMarker,
+		},
+		{
+			name:        "VM running/sidecar postStart does not gate",
+			containers:  sidecarExecHookContainers,
+			vmState:     resource.VirtualMachineStateRunning,
+			vmIP:        "10.0.0.3",
+			vmStartedAt: fakeTime,
+			containerStates: []resource.ContainerState{
+				{Status: resource.ContainerStatusRunning, StartedAt: fakeTime},
+			},
+			vmPostStartFinishedAt: readinessMarker,
+		},
+		{
+			// Universal gating: a hookless macOS pod with the VM Running but the
+			// probe marker not yet set is NotReady/NotStarted, even with an IP.
+			// This is the intended behavior change - hookless pods were Ready as
+			// soon as the VM ran.
+			name:                  "VM running/hookless postStart pending",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: nil,
+		},
+		{
+			// Same hookless pod once the probe sets the marker: Ready and Started.
+			// postStartFinish (minutes after VM start) stamps the Ready transition,
+			// proving the gate clears at probe finish, not VM start.
+			name:                  "VM running/hookless postStart finished",
+			containers:            oneContainer,
+			vmState:               resource.VirtualMachineStateRunning,
+			vmIP:                  "10.0.0.3",
+			vmStartedAt:           fakeTime,
+			vmPostStartFinishedAt: &postStartFinish,
 		},
 	}
 	for _, tc := range tests {
@@ -252,6 +389,11 @@ func TestGetPodStatus(t *testing.T) {
 			if tc.vmError != nil {
 				vm.On("Error").Return(tc.vmError)
 			}
+			// Universal gating: the mapper reads PostStartFinishedAt for every macOS
+			// container[0], hookless included. Every test case has a container[0], so the
+			// stub is registered unconditionally and is always consumed (an unused stub
+			// would fail AssertExpectations below).
+			vm.On("PostStartFinishedAt").Return(tc.vmPostStartFinishedAt)
 
 			containers := make([]resource.Container, len(tc.containerStates))
 			for i, state := range tc.containerStates {
@@ -320,7 +462,7 @@ func setupVZProviderWithPodInformer(tb testing.TB, ctx context.Context, vzClient
 	tb.Helper()
 
 	// Set up Kubernetes client and informers
-	fakeClient := fake.NewSimpleClientset(objects...)
+	fakeClient := fake.NewClientset(objects...)
 	podInformerFactory := informers.NewSharedInformerFactoryWithOptions(fakeClient, 1)
 	podInformer := podInformerFactory.Core().V1().Pods().Informer()
 	podInformerFactory.Start(ctx.Done())

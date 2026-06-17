@@ -30,3 +30,6 @@ build/
 fastlane/Appfile
 fastlane/Matchfile
 ruby/
+
+# Vendor directory
+vendor/

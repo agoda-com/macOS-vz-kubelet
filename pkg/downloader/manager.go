@@ -2,10 +2,11 @@ package downloader
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
@@ -24,7 +25,7 @@ type Manager struct {
 	eventRecorder event.EventRecorder
 	cachePath     string
 
-	downloads sync.Map // map[string]*state (ref -> state)
+	downloads *xsync.Map[string, *state]
 }
 
 // state contains the state of a download operation.
@@ -45,6 +46,7 @@ func NewManager(eventRecorder event.EventRecorder, cachePath string) *Manager {
 	return &Manager{
 		eventRecorder: eventRecorder,
 		cachePath:     cachePath,
+		downloads:     xsync.NewMap[string, *state](),
 	}
 }
 
@@ -78,34 +80,30 @@ func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool,
 	logger := log.G(ctx)
 	logger.Infof("Requesting to subscribe to download %q", ref)
 
-	value, _ := m.downloads.LoadOrStore(ref, &state{done: make(chan struct{}, 1)})
-	state, ok := value.(*state)
-	if !ok {
-		return cfg, d, fmt.Errorf("invalid state")
-	}
+	st, _ := m.downloads.LoadOrStore(ref, &state{done: make(chan struct{}, 1)})
 
-	state.subscribers.Add(1) // Increment the number of subscribers
+	st.subscribers.Add(1) // Increment the number of subscribers
 	defer func() {
-		if state.subscribers.Add(-1) == 0 {
+		if st.subscribers.Add(-1) == 0 {
 			m.downloads.Delete(ref) // Delete reference first so that the state is not accessed after it's closed
-			state.cancelFunc()      // Cancel download when last subscriber is removed
+			st.cancelFunc()         // Cancel download when last subscriber is removed
 			logger.Infof("No more subscribers left for %q, cleaning up...", ref)
 		}
 	}()
 
-	state.once.Do(func() {
+	st.once.Do(func() {
 		logger.Infof("Initiating download %q per request", ref)
 		downloadCreds := creds
 		// Use a background context to manage the underlying download
 		var downloadCtx context.Context
-		downloadCtx, state.cancelFunc = context.WithCancel(context.Background())
+		downloadCtx, st.cancelFunc = context.WithCancel(context.Background())
 
 		// Create a new span for the download operation and link it to the parent span
 		// New detached span is closed in startDownload function
 		name := "Manager.startDownload"
 		link := oteltrace.LinkFromContext(ctx)
 		// nolint: spancheck
-		downloadCtx, state.span = otel.Tracer(name).Start(downloadCtx, name, oteltrace.WithLinks(link))
+		downloadCtx, st.span = otel.Tracer(name).Start(downloadCtx, name, oteltrace.WithLinks(link))
 		downloadCtx = log.WithLogger(downloadCtx, log.G(ctx).WithField("method", name))
 
 		// Propagate the object reference to the download context
@@ -118,17 +116,17 @@ func (m *Manager) Download(ctx context.Context, ref string, ignoreExisting bool,
 		// Performing download in a go routine to keep listening for context cancellation.
 		// Start Download manages its own background context and cancels it when the download is done.
 		// nolint: contextcheck
-		go m.startDownload(downloadCtx, state, ref, ignoreExisting, downloadCreds)
+		go m.startDownload(downloadCtx, st, ref, ignoreExisting, downloadCreds)
 	})
 
 	// Link the download span to the subscriber's span
-	oteltrace.SpanFromContext(ctx).AddLink(oteltrace.Link{SpanContext: state.span.SpanContext()})
+	oteltrace.SpanFromContext(ctx).AddLink(oteltrace.Link{SpanContext: st.span.SpanContext()})
 
 	select {
 	case <-ctx.Done():
 		return cfg, d, context.Canceled
-	case <-state.done:
-		return state.config, state.duration, state.err
+	case <-st.done:
+		return st.config, st.duration, st.err
 	}
 }
 

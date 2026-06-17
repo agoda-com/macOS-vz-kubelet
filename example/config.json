@@ -1,0 +1,16 @@
+{
+    "mediatype": "application/vnd.agoda.macosvz.config.v1+json",
+    "os": "darwin",
+    "hardwareModelData": "YnBsaXN0MDDTAQIDBAUGXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QD1BsYXRmb3JtVmVyc2lvbl8QEk1pbmltdW1TdXBwb3J0ZWRPUxQAAAAAAAAAAAAAAAAAAAABEAKjBwgIEA0QAAgPKz1SY2VpawAAAAAAAAEBAAAAAAAAAAkAAAAAAAAAAAAAAAAAAABt",
+    "machineIdData": "YnBsaXN0MDDRAQJURUNJRBMWYaHTD7Jo1QgLEAAAAAAAAAEBAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAZ",
+    "storage": [
+        {
+            "mediatype": "application/vnd.agoda.macosvz.disk.image.v1",
+            "file": "disk.img"
+        },
+        {
+            "mediatype": "application/vnd.agoda.macosvz.aux.image.v1",
+            "file": "aux.img"
+        }
+    ]
+}

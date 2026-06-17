@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/agoda-com/macOS-vz-kubelet/internal/disk"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 
@@ -50,11 +52,11 @@ type Store struct {
 	ignoreExisting bool
 	eventRecorder  event.EventRecorder
 
-	closed          int32    // if the store is closed - 0: false, 1: true.
-	digestToPath    sync.Map // map[digest.Digest]string
-	mediaTypeToPath sync.Map // map[string]string
-	nameToStatus    sync.Map // map[string]*nameStatus
-	tmpFiles        sync.Map // map[string]bool
+	closed          int32                             // if the store is closed - 0: false, 1: true.
+	digestToPath    *xsync.Map[digest.Digest, string] // map[digest.Digest]string
+	mediaTypeToPath *xsync.Map[string, string]        // map[string]string
+	nameToStatus    *xsync.Map[string, *nameStatus]   // map[string]*nameStatus
+	tmpFiles        *xsync.Map[string, bool]          // map[string]bool
 
 	memoryStore *memory.Store
 }
@@ -74,11 +76,14 @@ func New(workingDir string, ignoreExisting bool, eventRecorder event.EventRecord
 	}
 
 	return &Store{
-		workingDir:     workingDirAbs,
-		ignoreExisting: ignoreExisting,
-		eventRecorder:  eventRecorder,
-
-		memoryStore: memory.New(),
+		workingDir:      workingDirAbs,
+		ignoreExisting:  ignoreExisting,
+		eventRecorder:   eventRecorder,
+		digestToPath:    xsync.NewMap[digest.Digest, string](),
+		mediaTypeToPath: xsync.NewMap[string, string](),
+		nameToStatus:    xsync.NewMap[string, *nameStatus](),
+		tmpFiles:        xsync.NewMap[string, bool](),
+		memoryStore:     memory.New(),
 	}, nil
 }
 
@@ -98,11 +103,7 @@ func (s *Store) Close(ctx context.Context) (err error) {
 
 	var errs []error
 	var files []string
-	s.tmpFiles.Range(func(name, _ any) bool {
-		path, ok := name.(string)
-		if !ok {
-			return true
-		}
+	s.tmpFiles.Range(func(path string, _ bool) bool {
 		files = append(files, path)
 		if err := os.Remove(path); err != nil {
 			errs = append(errs, err)
@@ -132,13 +133,8 @@ func (s *Store) Fetch(ctx context.Context, target ocispec.Descriptor) (fp io.Rea
 	}
 
 	// check if the content exists in the store
-	val, exists := s.digestToPath.Load(target.Digest)
+	path, exists := s.digestToPath.Load(target.Digest)
 	if exists {
-		path, ok := val.(string)
-		if !ok {
-			return nil, fmt.Errorf("failed to cast value to string: %v", val)
-		}
-
 		fp, err = os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -425,14 +421,9 @@ func (s *Store) GetFilePathForMediaType(ctx context.Context, mediaType MediaType
 		return path, ErrStoreClosed
 	}
 
-	val, ok := s.mediaTypeToPath.Load(string(mediaType))
+	path, ok := s.mediaTypeToPath.Load(string(mediaType))
 	if !ok {
-		return path, fmt.Errorf("media type %s not found", mediaType)
-	}
-
-	path, ok = val.(string)
-	if !ok {
-		return path, fmt.Errorf("failed to cast value to string: %v", val)
+		return "", fmt.Errorf("media type %s not found", mediaType)
 	}
 
 	return path, nil
@@ -493,8 +484,7 @@ func (s *Store) tempFile() (*os.File, error) {
 
 // status returns the nameStatus for the given name.
 func (s *Store) status(name string) *nameStatus {
-	v, _ := s.nameToStatus.LoadOrStore(name, &nameStatus{sync.RWMutex{}, false})
-	status, _ := v.(*nameStatus)
+	status, _ := s.nameToStatus.LoadOrStore(name, &nameStatus{})
 	return status
 }
 

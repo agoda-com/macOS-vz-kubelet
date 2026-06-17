@@ -1,0 +1,29 @@
+conditions:
+- lastProbeTime: null
+  lastTransitionTime: null
+  status: "True"
+  type: PodScheduled
+- lastProbeTime: null
+  lastTransitionTime: "2012-12-12T12:12:12Z"
+  status: "True"
+  type: Initialized
+- lastProbeTime: null
+  lastTransitionTime: "2012-12-12T12:17:12Z"
+  status: "True"
+  type: Ready
+containerStatuses:
+- containerID: vz://f4d693b914345df9efd05dd4e35cd9e0dbefbd558128df0b6fa70510b030daf9
+  image: localhost:5000/macos:latest
+  imageID: ""
+  lastState: {}
+  name: container-0
+  ready: true
+  restartCount: 0
+  started: true
+  state:
+    running:
+      startedAt: "2012-12-12T12:12:12Z"
+hostIP: 10.0.0.1
+phase: Running
+podIP: 10.0.0.3
+startTime: "2012-12-12T12:12:12Z"

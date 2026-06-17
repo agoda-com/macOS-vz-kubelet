@@ -9,8 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/agoda-com/macOS-vz-kubelet/internal/envcfg"
+	"github.com/agoda-com/macOS-vz-kubelet/internal/podstatus"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/utils"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
@@ -33,19 +36,29 @@ const (
 	// PodMountsDir is the directory where pod volumes are mounted.
 	// It is createdinside the cache directory.
 	PodMountsDir = "mounts"
-
-	// Timeout for executing post-start command.
-	//
-	// @note: While pre-stop hook timeout is suppored by simply setting terminationGracePeriodSeconds,
-	// as of now k8s does not support setting custom timeout for post-start command at all.
-	// Setting this constant as default for now (usually post-start should be something lite anyway).
-	PostStartCommandTimeout = 10 * time.Second
 )
 
 var (
 	// errVirtualizationGroupNotFound is returned when a virtualization group is not found.
 	errVirtualizationGroupNotFound = errdefs.NotFound("virtualization group not found")
+
+	// PostStartCommandTimeout bounds ONLY the single post-start hook exec. The
+	// SSH-readiness probe loop is bounded separately: each attempt by
+	// envcfg.SSHDialTimeout + a fixed probe-exec budget, the whole loop by
+	// envcfg.SSHReadinessTimeout. Resolved once at init via internal/envcfg (env name
+	// + default live there).
+	PostStartCommandTimeout = resolvePostStartCommandTimeout()
 )
+
+// resolvePostStartCommandTimeout resolves the post-start timeout once, warning on
+// an invalid/non-positive value (the returned d is the default in that case).
+func resolvePostStartCommandTimeout() time.Duration {
+	d, err := envcfg.PostStartTimeoutChecked()
+	if err != nil {
+		log.G(context.Background()).WithError(err).Warnf("invalid %s, using default %s", envcfg.PostStartTimeoutEnv, d)
+	}
+	return d
+}
 
 // virtualizationGroupExtras contains additional information for a virtualization group.
 type virtualizationGroupExtras struct {
@@ -62,7 +75,7 @@ type VzClientAPIs struct {
 	ContainerClient rm.ContainersClient // Optional
 
 	cachePath string
-	extras    sync.Map // map[types.NamespacedName]*virtualizationGroupExtras
+	extras    *xsync.Map[types.NamespacedName, *virtualizationGroupExtras]
 }
 
 // NewVzClientAPIs initializes and returns a new VzClientAPIs instance.
@@ -70,12 +83,18 @@ func NewVzClientAPIs(ctx context.Context, eventRecorder event.EventRecorder, net
 	ctx, span := trace.StartSpan(ctx, "VZClient.NewVzClientAPIs")
 	defer span.End()
 
+	// Surface the effective post-start timeout once a real logger is wired (the
+	// package-init resolver warns to the nop logger), so a typo'd
+	// VZ_POSTSTART_TIMEOUT that silently fell back to the default is visible.
+	log.G(ctx).Infof("post-start hook timeout: %s", PostStartCommandTimeout)
+
 	// force remove dangling mounts
 	_ = os.RemoveAll(filepath.Join(cachePath, PodMountsDir))
 
 	client = &VzClientAPIs{
 		MacOSClient: rm.NewMacOSClient(ctx, eventRecorder, networkInterfaceIdentifier, cachePath),
 		cachePath:   cachePath,
+		extras:      xsync.NewMap[types.NamespacedName, *virtualizationGroupExtras](),
 	}
 
 	containerClient, err := rm.NewDockerClient(ctx, dockerCl, eventRecorder)
@@ -159,9 +178,9 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		pullPolicy := macOSContainer.ImagePullPolicy
 
 		var postStartAction *resource.ExecAction
-		if lifecycle := macOSContainer.Lifecycle; lifecycle != nil && lifecycle.PostStart != nil && lifecycle.PostStart.Exec != nil {
+		if podstatus.HasExecPostStartHook(macOSContainer) {
 			postStartAction = &resource.ExecAction{
-				Command:         lifecycle.PostStart.Exec.Command,
+				Command:         macOSContainer.Lifecycle.PostStart.Exec.Command,
 				TimeoutDuration: PostStartCommandTimeout,
 			}
 		}
@@ -193,9 +212,9 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 			}
 
 			var postStartAction *resource.ExecAction
-			if lifecycle := container.Lifecycle; lifecycle != nil && lifecycle.PostStart != nil && lifecycle.PostStart.Exec != nil {
+			if podstatus.HasExecPostStartHook(container) {
 				postStartAction = &resource.ExecAction{
-					Command:         lifecycle.PostStart.Exec.Command,
+					Command:         container.Lifecycle.PostStart.Exec.Command,
 					TimeoutDuration: PostStartCommandTimeout,
 				}
 			}
@@ -235,13 +254,8 @@ func (c *VzClientAPIs) DeleteVirtualizationGroup(ctx context.Context, namespace,
 	}()
 
 	key := types.NamespacedName{Namespace: namespace, Name: name}
-	extrasValue, loaded := c.extras.Load(key)
+	extras, loaded := c.extras.Load(key)
 	if !loaded {
-		return errVirtualizationGroupNotFound
-	}
-
-	extras, ok := extrasValue.(*virtualizationGroupExtras)
-	if !ok {
 		return errVirtualizationGroupNotFound
 	}
 

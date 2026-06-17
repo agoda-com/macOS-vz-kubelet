@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/pcap"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/pcap"
 )
 
 // CaptureIPWithTcpDump captures the IP address of the device with the specified MAC address using tcpdump.

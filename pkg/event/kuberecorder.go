@@ -16,6 +16,11 @@ const (
 	// Upstream kubelet records "FailedToRetrieveImagePullSecret" when pull secrets cannot be resolved:
 	// https://github.com/kubernetes/website/blob/main/content/en/docs/tasks/configure-pod-container/pull-image-private-registry.md
 	eventReasonFailedImagePullSecrets = "FailedToRetrieveImagePullSecret"
+
+	// No upstream events constant: the post-start SSH readiness probe is this
+	// provider's own gate (the guest is reachable only over SSH), so the reason is
+	// defined locally, like eventReasonFailedImagePullSecrets above.
+	eventReasonFailedPostStartProbe = "FailedPostStartProbe"
 )
 
 type objectRefKeyType struct{}
@@ -87,6 +92,10 @@ func (r *KubeEventRecorder) FailedToStartContainer(ctx context.Context, containe
 func (r *KubeEventRecorder) FailedPostStartHook(ctx context.Context, containerName string, cmd []string, err error) {
 	cmdStr := fmt.Sprintf("[%s]", strings.Join(cmd, ", "))
 	r.recordEvent(ctx, containerName, corev1.EventTypeWarning, events.FailedPostStartHook, "Exec lifecycle hook (%s) for Container \"%s\" failed - error: %v", cmdStr, containerName, err)
+}
+
+func (r *KubeEventRecorder) FailedPostStartProbe(ctx context.Context, containerName string, err error) {
+	r.recordEvent(ctx, containerName, corev1.EventTypeWarning, eventReasonFailedPostStartProbe, "SSH readiness probe for Container \"%s\" failed - error: %v", containerName, err)
 }
 
 func (r *KubeEventRecorder) FailedPreStopHook(ctx context.Context, containerName string, cmd []string, err error) {

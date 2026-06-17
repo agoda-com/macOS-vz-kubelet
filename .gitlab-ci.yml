@@ -150,7 +150,10 @@ e2e-test:
     BUSYBOX_IMAGE: "busybox:1.37.0"
     DOCKER_SOCKET_PATH: "unix:///Users/master/.colima/docker.sock"
     NODE_NAME: "macos-vz-kubelet-e2e-test-node-$CI_JOB_ID"
+    VZ_SSH_DIAL_TIMEOUT: "5s"
+    VZ_POSTSTART_TIMEOUT: "10s"
   script:
+    - docker -H "$DOCKER_SOCKET_PATH" system prune -af --volumes || true
     - make e2e-test coverage
   after_script:
     - |
@@ -165,8 +168,6 @@ e2e-test:
   extends:
     - .go-build-macos
   variables:
-    APPLE_DEVELOPER_ID_INTERMEDIATE_CERT_G1_URL: "https://www.apple.com/certificateauthority/DeveloperIDCA.cer"
-    APPLE_DEVELOPER_ID_INTERMEDIATE_CERT_G2_URL: "https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer"
     SPACESHIP_SKIP_2FA_UPGRADE: 1 # Skip 2FA upgrade for fastlane
   cache:
     - <<: *cache_mod
@@ -180,24 +181,12 @@ e2e-test:
     - set -eo pipefail
     - !reference [.go-build-macos, before_script]
     - |
-      printf "\e[0Ksection_start:%s:prepare_intermediate_cert[collapsed=true]\r\e[0K%s\n" "$(date +%s)" "Prepare Apple Developer ID Intermediate Certificate"
-      prepare_certificate() {
-        local cert_url="$1"
-        local cert_path="$(mktemp)"
-        curl -fsS "$cert_url" -o "$cert_path"
-        sudo security import "$cert_path" /Library/Keychains/System.keychain
-      }
-
-      prepare_certificate "$APPLE_DEVELOPER_ID_INTERMEDIATE_CERT_G1_URL"
-      prepare_certificate "$APPLE_DEVELOPER_ID_INTERMEDIATE_CERT_G2_URL"
-      printf "\e[0Ksection_end:%s:prepare_intermediate_cert\r\e[0K\n" "$(date +%s)"
-    - |
       printf "\e[0Ksection_start:%s:prepare_fastlane[collapsed=true]\r\e[0K%s\n" "$(date +%s)" "Prepare Fastlane environment"
       echo "Copying fastlane related secret configuration files..."
       cp "$APPFILE" "$CI_PROJECT_DIR/fastlane/Appfile"
       cp "$MATCHFILE" "$CI_PROJECT_DIR/fastlane/Matchfile"
       echo "Installing fastlane..."
-      bundle install
+      mise exec -- bundle install
       printf "\e[0Ksection_end:%s:prepare_fastlane\r\e[0K\n" "$(date +%s)"
 
 snapshot:
@@ -216,7 +205,7 @@ snapshot:
     - set -eo pipefail
     - |
       printf "\e[0Ksection_start:%s:build_project[collapsed=false]\r\e[0K%s\n" "$(date +%s)" "Build and sign project"
-      bundle exec fastlane build_snapshot
+      mise exec -- bundle exec fastlane build_snapshot
       printf "\e[0Ksection_end:%s:build_project\r\e[0K\n" "$(date +%s)"
   artifacts:
     paths:
@@ -236,5 +225,5 @@ release:
     - set -eo pipefail
     - |
       printf "\e[0Ksection_start:%s:release_project[collapsed=false]\r\e[0K%s\n" "$(date +%s)" "Release project"
-      bundle exec fastlane build_release
+      mise exec -- bundle exec fastlane build_release
       printf "\e[0Ksection_end:%s:release_project\r\e[0K\n" "$(date +%s)"

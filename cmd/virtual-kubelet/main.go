@@ -27,11 +27,13 @@ import (
 
 	docker "github.com/moby/moby/client"
 
+	"github.com/bombsimon/logrusr/v4"
 	"github.com/mitchellh/go-homedir"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/otel/attribute"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	"k8s.io/apiserver/pkg/server/options"
@@ -40,12 +42,14 @@ import (
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
+	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 var (
 	appIdentifier = "com.agoda.fleet.virtualization"
 	buildVersion  = "dev"
-	k8sVersion    = "v1.34.1" // This should follow the version of k8s.io we are importing
+	k8sVersion    = "v1.35.6" // This should follow the version of k8s.io we are importing
 
 	taintKey    = envOrDefault("VKUBELET_TAINT_KEY", "virtual-kubelet.io/provider")
 	taintEffect = envOrDefault("VKUBELET_TAINT_EFFECT", string(corev1.TaintEffectNoSchedule))
@@ -275,6 +279,27 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		return err
 	}
 
+	// Route controller-runtime's internal logs (used by certwatcher) through logrus
+	// so that all log output uses the same format.
+	ctrllog.SetLogger(logrusr.New(logrus.StandardLogger()))
+
+	// Set up certificate watcher for automatic TLS cert rotation.
+	// Certs on disk are rotated by an external service; without this,
+	// the process would keep serving expired in-memory certs until restarted.
+	certWatcher, err := certwatcher.New(certPath, keyPath)
+	if err != nil {
+		return fmt.Errorf("failed to create certificate watcher: %w", err)
+	}
+	certWatcher.RegisterCallback(func(cert tls.Certificate) {
+		log.G(ctx).Info("TLS certificate rotated successfully")
+	})
+	certWatcherErrCh := make(chan error, 1)
+	go func() {
+		if err := certWatcher.Start(ctx); err != nil {
+			certWatcherErrCh <- fmt.Errorf("certificate watcher failed: %w", err)
+		}
+	}()
+
 	node, err := nodeutil.NewNode(nodeName,
 		func(cfg nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
 			if port := os.Getenv("KUBELET_PORT"); port != "" {
@@ -344,7 +369,13 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		withTaint,
 		withProviderID,
 		withVersion,
-		nodeutil.WithTLSConfig(nodeutil.WithKeyPairFromPath(certPath, keyPath), withCA),
+		nodeutil.WithTLSConfig(
+			func(cfg *tls.Config) error {
+				cfg.GetCertificate = certWatcher.GetCertificate
+				return nil
+			},
+			withCA,
+		),
 		func(cfg *nodeutil.NodeConfig) error {
 			return withWebhookAuth(ctx, cfg)
 		},
@@ -370,6 +401,8 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		if err != nil {
 			return fmt.Errorf("error running the node: %w", err)
 		}
+	case err := <-certWatcherErrCh:
+		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
