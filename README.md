@@ -357,8 +357,7 @@ build only on macOS (`darwin/arm64`).
 These projects are the foundation `macOS-vz-kubelet` is built on:
 
 - [Virtual Kubelet](https://github.com/virtual-kubelet/virtual-kubelet) - the Kubernetes kubelet
-  implementation this provider plugs into. A [fork](https://github.com/agoda-com/virtual-kubelet) is used (see
-  the `replace` directive in `go.mod`).
+  implementation this provider plugs into.
 - [Code-Hex/vz](https://github.com/Code-Hex/vz) - Go bindings for Apple Virtualization.framework.
 - [oras-project/oras-go](https://github.com/oras-project/oras-go) - ORAS Go library for OCI artifacts.
 - [oras-macos-vz](https://github.com/agoda-com/oras-macos-vz) - the ORAS CLI fork used to package and push VM
