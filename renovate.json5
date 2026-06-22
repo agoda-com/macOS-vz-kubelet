@@ -1,0 +1,162 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+
+  // ---- Global -------------------------------------------------------------
+  dependencyDashboard: true,
+  dependencyDashboardTitle: "Dependency Dashboard",
+  labels: ["dependencies"],
+
+  // Conventional-commit style to match the repo (chore(deps): ...).
+  semanticCommits: "enabled",
+  commitMessagePrefix: "chore(deps):",
+
+  // Conservative cadence: batch lookups early Monday so PRs land at week start.
+  schedule: ["* 0-6 * * 1"],
+
+  // Keep go.sum tidy after a module bump.
+  postUpdateOptions: ["gomodTidy"],
+
+  // Security fixes bypass the schedule (config:recommended enables this; kept explicit).
+  vulnerabilityAlerts: {
+    labels: ["dependencies", "security"],
+  },
+
+  // prHourlyLimit inherited from config:recommended (currently 2) - not overridden.
+  // Automerge is OFF everywhere by deliberate first-rollout choice: humans review every
+  // PR initially. Enabling platformAutomerge for low-risk groups is a follow-up tuning step.
+
+  packageRules: [
+    // ---- gomod ------------------------------------------------------------
+    // k8s staged libraries move in lockstep with the kubelet's k8s minor or the build
+    // breaks - one grouped PR. k8s.io/kubernetes is v1.x while the staging repos are
+    // v0.x; group by exact name, not by version alignment. Deliberately EXCLUDES
+    // k8s.io/klog, k8s.io/klog/v2, k8s.io/kube-openapi, k8s.io/utils - those version
+    // independently and must not be swept into the lockstep group.
+    // enabled:true is REQUIRED: apiextensions-apiserver, controller-manager, kms are go.mod
+    // `// indirect` deps and Renovate disables indirect gomod deps by default; without this
+    // only 7 of the 10 would move and the group would break the lockstep it exists to keep.
+    // It re-enables ONLY these named members, not indirect deps in general.
+    {
+      // Named "kubernetes-go" to match Renovate's built-in kubernetes-go monorepo preset: that
+      // preset already routes the recognized staged libs to branch renovate/kubernetes-go, while
+      // k8s.io/kms + k8s.io/kubernetes are NOT in the monorepo data and would otherwise fall to a
+      // separate branch (TWO PRs, breaking the single-PR lockstep). Sharing the preset's group name
+      // makes those two JOIN the preset branch so all 10 land in one PR.
+      groupName: "kubernetes-go",
+      matchManagers: ["gomod"],
+      enabled: true,
+      matchDepNames: [
+        "k8s.io/api",
+        "k8s.io/apiextensions-apiserver",
+        "k8s.io/apimachinery",
+        "k8s.io/apiserver",
+        "k8s.io/client-go",
+        "k8s.io/component-base",
+        "k8s.io/controller-manager",
+        "k8s.io/kms",
+        "k8s.io/kubelet",
+        "k8s.io/kubernetes",
+      ],
+    },
+
+    // OpenTelemetry Go family - version together to avoid otel/sdk vs otel/trace skew.
+    {
+      groupName: "opentelemetry",
+      matchManagers: ["gomod"],
+      matchDepNames: ["go.opentelemetry.io/**"],
+    },
+
+    // Go toolchain. The managed dep is the go.mod `go` directive (depName "go",
+    // datasource golang-version). The .mise.toml `go` entry ALSO extracts as depName "go"
+    // (packageName golang/go, datasource github-tags), so matchDepNames:["go"] groups both
+    // when the mise lookup yields an update. Approval-gated: the toolchain is foundational -
+    // bumping it is a deliberate, coordinated change. NOTE Renovate cannot guarantee the two
+    // move in one PR (different datasources/version shapes can resolve to different targets);
+    // treat the go.mod directive as the managed pin and bump the .mise.toml go by hand in
+    // lockstep on approval.
+    {
+      groupName: "go toolchain",
+      matchDepNames: ["go"],
+      dependencyDashboardApproval: true,
+    },
+
+    // cgo Virtualization.framework binding - every macOS-VM code path links it, and a bad
+    // bump cannot be caught by the Linux CI (it only LINKS on a mac host). Approval-gate it
+    // and tag so a human runs a mac-host build before merging.
+    {
+      matchManagers: ["gomod"],
+      matchDepNames: ["github.com/Code-Hex/vz/v3"],
+      addLabels: ["needs-host-validation"],
+      dependencyDashboardApproval: true,
+    },
+
+    // virtual-kubelet is pinned to a fork pseudo-version (a specific upstream commit).
+    // Don't auto-PR a fork-commit digest bump - surface it behind dashboard approval.
+    {
+      matchManagers: ["gomod"],
+      matchDepNames: ["github.com/virtual-kubelet/virtual-kubelet"],
+      dependencyDashboardApproval: true,
+    },
+
+    // docker + moby are the same upstream at the same +incompatible version - group them.
+    {
+      groupName: "docker",
+      matchManagers: ["gomod"],
+      matchDepNames: ["github.com/docker/docker", "github.com/moby/moby"],
+    },
+
+    // ---- ci tooling (annotated dev tools) ---------------------------------
+    // go.mk-installed dev tools share one grouped PR to cut review noise. goreleaser
+    // (.mise.toml) rides along here too. gocov-xml is intentionally NOT annotated: go.mk pins
+    // it to GOCOV_VERSION (a different repo's tag reused), so it tracks gocov by design.
+    {
+      groupName: "ci tooling",
+      matchDepNames: [
+        "golangci/golangci-lint",
+        "gotestyourself/gotestsum",
+        "axw/gocov",
+        "matm/gocov-html",
+        "go-gremlins/gremlins",
+        "goreleaser/goreleaser",
+      ],
+    },
+
+    // ---- deliberately UNMANAGED (documented so reviewers know it's intentional) ----
+    // MACOS_IMAGE in .gitlab-ci.yml: `image: "$MACOS_IMAGE"` is variable-indirected
+    //   (skipReason contains-variable) and points at an internal registry the bot can't auth.
+    // bundler (Gemfile/Gemfile.lock, fastlane): left at config:recommended default (enabled).
+  ],
+
+  // ---- customManagers -----------------------------------------------------
+  // NOTE: `fileMatch` with a BARE regex (no /.../ delimiters). `managerFilePatterns`
+  // (Renovate 40.2.0+) is rejected by older validators; `fileMatch` validates on 39.x AND
+  // migrates forward on newer bots.
+  customManagers: [
+    // Annotation manager (go.mk): `# renovate: datasource=X depName=Y [versioning=Z]` above
+    // a `VAR ?= vX.Y.Z` line. The file stores the SAME `v`-prefixed form as the upstream
+    // github `vX.Y.Z` tags, so no extractVersion transform is needed - tag format == file
+    // format, write-back is exact.
+    {
+      customType: "regex",
+      fileMatch: ["^makefiles/go\\.mk$"],
+      matchStrings: [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+versioning=(?<versioning>\\S+))?\\s*\\n\\s*\\w+_VERSION\\s*\\?=\\s*(?<currentValue>\\S+)",
+      ],
+      versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
+    },
+
+    // Annotation manager (.mise.toml): same annotation, but the file stores BARE versions
+    // (`tool = "2.14.0"`) while the github tags are `vX.Y.Z`. extractVersionTemplate strips the
+    // leading `v` so Renovate compares/writes the bare form back, matching the file.
+    {
+      customType: "regex",
+      fileMatch: ["^\\.mise\\.toml$"],
+      matchStrings: [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)(?:\\s+versioning=(?<versioning>\\S+))?\\s*\\n\\s*\\S+\\s*=\\s*\"(?<currentValue>[^\"]+)\"",
+      ],
+      extractVersionTemplate: "^v(?<version>.+)$",
+      versioningTemplate: "{{#if versioning}}{{{versioning}}}{{else}}semver{{/if}}",
+    },
+  ],
+}

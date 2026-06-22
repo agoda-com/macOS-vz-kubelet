@@ -15,7 +15,6 @@ import (
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/vm/config"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
 
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/registry/remote"
@@ -77,7 +76,7 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 		Steps:    params.MaxAttempts,   // Maximum number of retry attempts
 		Cap:      params.MaxDelay,      // Maximum delay between retries
 	}, func(ctx context.Context) (done bool, _ error) { // never use condition error
-		_, err = pull(ctx, params.Ref, store, params.Credentials)
+		err = pull(ctx, params.Ref, store, params.Credentials)
 		if err != nil {
 			// log error, but do not return it to continue retrying
 			eventRecorder.FailedToPullImage(ctx, params.Ref, "", err)
@@ -109,9 +108,16 @@ func Download(ctx context.Context, params Params, eventRecorder event.EventRecor
 	}, nil
 }
 
+// ValidateImageReference reports whether ref parses as a pullable OCI reference.
+// It uses the same parser pull uses (remote.NewRepository) so admission-time
+// validation cannot drift from the actual pull.
+func ValidateImageReference(ref string) error {
+	_, err := remote.NewRepository(ref)
+	return err
+}
+
 // pull pulls an OCI image from a remote repository and stores it in the local store.
-// It returns the descriptor of the downloaded content.
-func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) (desc *ocispec.Descriptor, err error) {
+func pull(ctx context.Context, ref string, store *oci.Store, creds resource.RegistryCredentials) (err error) {
 	ctx, span := trace.StartSpan(ctx, "OCI.pull")
 	defer func() {
 		span.SetStatus(err)
@@ -120,7 +126,7 @@ func pull(ctx context.Context, ref string, store *oci.Store, creds resource.Regi
 
 	repo, err := remote.NewRepository(ref)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create repository from reference %s: %w", ref, err)
+		return fmt.Errorf("failed to create repository from reference %s: %w", ref, err)
 	}
 	// Determine if the repository is using plain HTTP based on if it's localhost or a local IP
 	repo.PlainHTTP = isLocalhostOrLocalIP(repo.Reference.Registry)
@@ -132,18 +138,22 @@ func pull(ctx context.Context, ref string, store *oci.Store, creds resource.Regi
 	}
 
 	ctx = auth.AppendRepositoryScope(ctx, repo.Reference, auth.ActionPull)
-	descOras, err := oras.Copy(ctx, repo, repo.Reference.Reference, store, repo.Reference.Reference, oras.DefaultCopyOptions)
+	_, err = oras.Copy(ctx, repo, repo.Reference.Reference, store, repo.Reference.Reference, oras.DefaultCopyOptions)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return &descOras, nil
+	return nil
 }
 
 func toORASCredential(creds resource.RegistryCredentials) auth.Credential {
+	// IdentityToken rides RefreshToken: oras-go exchanges it via the registry OAuth2
+	// grant_type=refresh_token flow. Username/Password still pass through for Basic and
+	// distribution-token auth.
 	return auth.Credential{
-		Username: creds.Username,
-		Password: creds.Password,
+		Username:     creds.Username,
+		Password:     creds.Password,
+		RefreshToken: creds.IdentityToken,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
@@ -21,6 +22,10 @@ var (
 
 func (p *MacOSVZProvider) resolveImagePullCredentials(ctx context.Context, pod *corev1.Pod) (resource.RegistryCredentialStore, error) {
 	keyring := &credentialprovider.BasicDockerKeyring{}
+	// tokenKeyring mirrors keyring registry-for-registry, identity token in the Password slot.
+	// Identical registry keys => Lookup match lists align by index, so the token correlates to the
+	// exact entry ForImage selects without reimplementing the keyring's registry matching.
+	tokenKeyring := &credentialprovider.BasicDockerKeyring{}
 	hasCredentials := false
 	seen := make(map[string]struct{})
 	var secretRefs []corev1.LocalObjectReference
@@ -75,18 +80,33 @@ func (p *MacOSVZProvider) resolveImagePullCredentials(ctx context.Context, pod *
 			continue
 		}
 
-		dockerConfig, err := parseImagePullSecret(secret)
+		dockerConfig, identityTokens, err := parseImagePullSecret(secret)
 		if err != nil {
 			return resource.RegistryCredentialStore{}, fmt.Errorf("failed to parse imagePullSecret %q: %w", ref.Name, err)
 		}
 
-		keyring.Add(&credentialprovider.CredentialSource{
+		source := &credentialprovider.CredentialSource{
 			Secret: &credentialprovider.SecretCoordinates{
 				UID:       string(secret.UID),
 				Namespace: secret.Namespace,
 				Name:      secret.Name,
 			},
-		}, dockerConfig)
+		}
+		// Add to BOTH keyrings one registry at a time, sorted. A whole-map Add iterates Go's randomized
+		// map order, so two registry keys normalizing to the same keyring key could append in a
+		// different order per keyring, misaligning the index correlation. Sorted single-registry Adds
+		// keep the collapse/append order identical in both, binding each token to its entry.
+		registries := make([]string, 0, len(dockerConfig))
+		for registry := range dockerConfig {
+			registries = append(registries, registry)
+		}
+		sort.Strings(registries)
+		for _, registry := range registries {
+			keyring.Add(source, credentialprovider.DockerConfig{registry: dockerConfig[registry]})
+			tokenKeyring.Add(source, credentialprovider.DockerConfig{
+				registry: credentialprovider.DockerConfigEntry{Password: identityTokens[registry]},
+			})
+		}
 		hasCredentials = true
 	}
 
@@ -94,10 +114,13 @@ func (p *MacOSVZProvider) resolveImagePullCredentials(ctx context.Context, pod *
 		return resource.RegistryCredentialStore{}, nil
 	}
 
-	return resource.NewRegistryCredentialStore(keyring), nil
+	return resource.NewRegistryCredentialStore(keyring, tokenKeyring), nil
 }
 
-func parseImagePullSecret(secret *corev1.Secret) (credentialprovider.DockerConfig, error) {
+// parseImagePullSecret returns the docker config plus the per-registry identity tokens recovered
+// from the raw secret, returned separately since the kubernetes docker config type cannot model
+// an identity token.
+func parseImagePullSecret(secret *corev1.Secret) (credentialprovider.DockerConfig, map[string]string, error) {
 	switch secret.Type {
 	case corev1.SecretTypeDockerConfigJson:
 		return parseDockerConfigJSON(secret.Data[corev1.DockerConfigJsonKey])
@@ -105,27 +128,50 @@ func parseImagePullSecret(secret *corev1.Secret) (credentialprovider.DockerConfi
 		if data, ok := secret.Data[corev1.DockerConfigJsonKey]; ok && len(data) > 0 {
 			return parseDockerConfigJSON(data)
 		}
-		return parseDockerConfig(secret.Data[corev1.DockerConfigKey])
+		cfg, err := parseDockerConfig(secret.Data[corev1.DockerConfigKey])
+		return cfg, nil, err
 	default:
-		return nil, fmt.Errorf("unsupported secret type %q", secret.Type)
+		return nil, nil, fmt.Errorf("unsupported secret type %q", secret.Type)
 	}
 }
 
-func parseDockerConfigJSON(raw []byte) (credentialprovider.DockerConfig, error) {
+func parseDockerConfigJSON(raw []byte) (credentialprovider.DockerConfig, map[string]string, error) {
 	if len(raw) == 0 {
-		return nil, errEmptyDockerConfig
+		return nil, nil, errEmptyDockerConfig
 	}
 
 	var cfg credentialprovider.DockerConfigJSON
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("invalid docker config json: %w", err)
+		return nil, nil, fmt.Errorf("invalid docker config json: %w", err)
 	}
 
 	if len(cfg.Auths) == 0 {
-		return nil, errEmptyDockerConfig
+		return nil, nil, errEmptyDockerConfig
 	}
 
-	return cfg.Auths, nil
+	return cfg.Auths, identityTokensFromDockerConfigJSON(raw), nil
+}
+
+// identityTokensFromDockerConfigJSON extracts the per-registry identity token from a raw
+// .dockerconfigjson, which the kubernetes docker config type does not model. Registries
+// without an identity token are omitted.
+func identityTokensFromDockerConfigJSON(raw []byte) map[string]string {
+	var parsed struct {
+		Auths map[string]struct {
+			IdentityToken string `json:"identitytoken"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+
+	tokens := make(map[string]string, len(parsed.Auths))
+	for registry, entry := range parsed.Auths {
+		if entry.IdentityToken != "" {
+			tokens[registry] = entry.IdentityToken
+		}
+	}
+	return tokens
 }
 
 func parseDockerConfig(raw []byte) (credentialprovider.DockerConfig, error) {

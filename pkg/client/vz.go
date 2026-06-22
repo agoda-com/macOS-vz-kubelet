@@ -16,6 +16,7 @@ import (
 	"github.com/agoda-com/macOS-vz-kubelet/internal/podstatus"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/utils"
 	"github.com/agoda-com/macOS-vz-kubelet/internal/volumes"
+	"github.com/agoda-com/macOS-vz-kubelet/pkg/downloader"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/event"
 	"github.com/agoda-com/macOS-vz-kubelet/pkg/resource"
 	rm "github.com/agoda-com/macOS-vz-kubelet/pkg/resourcemanager"
@@ -137,6 +138,35 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 		return errdefs.InvalidInput("regular containers are not supported")
 	}
 
+	// Validate everything knowable from the spec synchronously, before registering
+	// any cache entry or spawning create goroutines. Otherwise a doomed spec is
+	// caught too late: macOS CreateVirtualMachine LoadOrStores then returns nil, so a
+	// bad image ref surfaces async as a Failed VM the controller force-deletes and
+	// recreates in a churn loop, and an invalid macOS container[0] still spawns sidecars.
+	macOSContainer := pod.Spec.Containers[0]
+	cpu, err := utils.ExtractCPURequest(macOSContainer.Resources.Requests)
+	if err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+	if _, err = vm.ValidateCPUCount(cpu); err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+	memorySize, err := utils.ExtractMemoryRequest(macOSContainer.Resources.Requests)
+	if err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+	if _, err = vm.ValidateMemorySize(memorySize); err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+	// Validate the macOS image ref with the same oras parser the pull uses, so a
+	// malformed ref fails create synchronously instead of registering a VM that then
+	// fails async and churns (force-delete -> recreate). Only container[0]: sidecar
+	// images are pulled by the Linux backend, whose parser expands Docker-Hub short
+	// names (redis:7) that this one rejects, so validating them here would false-reject.
+	if err = downloader.ValidateImageReference(macOSContainer.Image); err != nil {
+		return errdefs.InvalidInputf("invalid image reference %q: %v", macOSContainer.Image, err)
+	}
+
 	// Due to the nature of virtual kubelet CreatePod context,
 	// we need to handle the context cancellation on demand ourselves
 	ctx, extras.cancelFunc = context.WithCancel(ctx)
@@ -146,28 +176,7 @@ func (c *VzClientAPIs) CreateVirtualizationGroup(ctx context.Context, pod *corev
 
 	g := errgroup.Group{}
 	g.Go(func() error {
-		// vz: always assume that first container is macOS container
-		macOSContainer := pod.Spec.Containers[0]
 		vmCreds, _ := creds.ForImage(macOSContainer.Image)
-
-		// Extract and validate CPU and memory requests
-		rl := macOSContainer.Resources.Requests
-		cpu, err := utils.ExtractCPURequest(rl)
-		if err != nil {
-			return errdefs.AsInvalidInput(err)
-		}
-		_, err = vm.ValidateCPUCount(cpu)
-		if err != nil {
-			return errdefs.AsInvalidInput(err)
-		}
-		memorySize, err := utils.ExtractMemoryRequest(rl)
-		if err != nil {
-			return errdefs.AsInvalidInput(err)
-		}
-		_, err = vm.ValidateMemorySize(memorySize)
-		if err != nil {
-			return errdefs.AsInvalidInput(err)
-		}
 
 		mounts, err := volumes.CreateContainerMounts(ctx, extras.rootDir, macOSContainer, pod, serviceAccountToken, configMaps)
 		if err != nil {
@@ -514,6 +523,12 @@ func (c *VzClientAPIs) GetVirtualizationGroupStats(ctx context.Context, namespac
 	// vz: always assume that first container is macOS container
 	vmStats.Name = containers[0].Name
 	cs = append(cs, vmStats)
+
+	// Sidecar stats require the container client; it is left nil when the docker
+	// client fails to initialize, so guard against a nil deref before the loop.
+	if len(containers) > 1 && c.ContainerClient == nil {
+		return nil, errdefs.NotFound("container client not available")
+	}
 
 	for _, container := range containers[1:] {
 		containerStats, err := c.ContainerClient.GetContainerStats(ctx, namespace, name, container.Name)

@@ -251,8 +251,11 @@ func TestCreatePod(t *testing.T) {
 }
 
 func TestCreatePod_ImagePullSecrets(t *testing.T) {
-	authJSON := base64.StdEncoding.EncodeToString([]byte("jsonuser:jsonpass"))
-	authDockercfg := base64.StdEncoding.EncodeToString([]byte("dockuser:dockpass"))
+	authJSON := base64.StdEncoding.EncodeToString([]byte("jsonuser:jsonpass-fixture-value"))
+	authDockercfg := base64.StdEncoding.EncodeToString([]byte("dockuser:dockpass-fixture-value"))
+	authSpecific := base64.StdEncoding.EncodeToString([]byte("specificuser:specificpass-fixture-value"))
+	authAliasFirst := base64.StdEncoding.EncodeToString([]byte("aliasfirst:aliasfirstpass-fixture-value"))
+	authAliasSecond := base64.StdEncoding.EncodeToString([]byte("aliassecond:aliassecondpass-fixture-value"))
 
 	tests := []struct {
 		name         string
@@ -261,7 +264,6 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 		createSecret bool
 		expectErr    bool
 		expectCreds  bool
-		expectedHost string
 		expectedCred resource.RegistryCredentials
 		podImage     string
 	}{
@@ -271,8 +273,7 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authJSON + `"}}}`)},
 			createSecret: true,
 			expectCreds:  true,
-			expectedHost: "registry.example.com",
-			expectedCred: resource.RegistryCredentials{Username: "jsonuser", Password: "jsonpass", Server: "registry.example.com"},
+			expectedCred: resource.RegistryCredentials{Username: "jsonuser", Password: "jsonpass-fixture-value", Server: "registry.example.com"},
 			podImage:     "registry.example.com/app:1",
 		},
 		{
@@ -281,9 +282,73 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 			secretData:   map[string][]byte{corev1.DockerConfigKey: []byte(`{"registry.example.com":{"auth":"` + authDockercfg + `"}}`)},
 			createSecret: true,
 			expectCreds:  true,
-			expectedHost: "registry.example.com",
-			expectedCred: resource.RegistryCredentials{Username: "dockuser", Password: "dockpass", Server: "registry.example.com"},
+			expectedCred: resource.RegistryCredentials{Username: "dockuser", Password: "dockpass-fixture-value", Server: "registry.example.com"},
 			podImage:     "registry.example.com/app:2",
+		},
+		{
+			name:         "DockerConfigJSONWithIdentityToken",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authJSON + `","identitytoken":"refresh-token-fixture-value"}}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{Username: "jsonuser", Password: "jsonpass-fixture-value", IdentityToken: "refresh-token-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:6",
+		},
+		{
+			name:         "DockerConfigJSONIdentityTokenOnly",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"identitytoken":"refresh-token-fixture-value"}}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{IdentityToken: "refresh-token-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:7",
+		},
+		{
+			// Overlapping globs: most-specific match (registry.example.com/team) is tokenless,
+			// less-specific registry.example.com carries a token. ForImage returns the most-specific
+			// match's creds, so the token must NOT bleed from the broader entry - token always
+			// correlates to the registry ForImage actually selects.
+			name:         "DockerConfigJSONMostSpecificMatchWinsTokenless",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authJSON + `","identitytoken":"broad-token-fixture-value"},"https://registry.example.com/team":{"auth":"` + authSpecific + `"}}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{Username: "specificuser", Password: "specificpass-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/team/app:8",
+		},
+		{
+			// Two dockerconfigjson keys (with and without scheme) normalize to the SAME keyring key,
+			// collapsing into one ordered slot. Sorted lockstep Add keeps both keyrings' collapse order
+			// identical, so the won entry's token correlates to that exact entry. Scheme-prefixed key
+			// sorts first, so its creds and token are the ones surfaced.
+			name:         "DockerConfigJSONAliasedKeysCorrelateToken",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authAliasFirst + `","identitytoken":"alias-token-fixture-value"},"registry.example.com":{"auth":"` + authAliasSecond + `"}}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{Username: "aliasfirst", Password: "aliasfirstpass-fixture-value", IdentityToken: "alias-token-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:11",
+		},
+		{
+			// A real .dockerconfigjson carries an email but no identity token. Email must never be
+			// surfaced as the token, which would break an otherwise-working user/pass pull.
+			name:         "DockerConfigJSONWithEmailNotTreatedAsToken",
+			secretType:   corev1.SecretTypeDockerConfigJson,
+			secretData:   map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"https://registry.example.com":{"auth":"` + authJSON + `","email":"me@example.com"}}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{Username: "jsonuser", Password: "jsonpass-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:9",
+		},
+		{
+			// The legacy .dockercfg format also carries an email and never an identity token.
+			name:         "DockercfgWithEmailNotTreatedAsToken",
+			secretType:   corev1.SecretTypeDockercfg,
+			secretData:   map[string][]byte{corev1.DockerConfigKey: []byte(`{"registry.example.com":{"auth":"` + authDockercfg + `","email":"me@example.com"}}`)},
+			createSecret: true,
+			expectCreds:  true,
+			expectedCred: resource.RegistryCredentials{Username: "dockuser", Password: "dockpass-fixture-value", Server: "registry.example.com"},
+			podImage:     "registry.example.com/app:10",
 		},
 		{
 			name:         "InvalidSecretData",
@@ -370,7 +435,7 @@ func TestCreatePod_ImagePullSecrets(t *testing.T) {
 						if !ok {
 							return false
 						}
-						return cred.Username == tc.expectedCred.Username && cred.Password == tc.expectedCred.Password
+						return cred == tc.expectedCred
 					}
 					return !ok
 				})).Return(nil)

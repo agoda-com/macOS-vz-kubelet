@@ -5,9 +5,13 @@ include makefiles/base.mk
 
 ### Variables
 
+# renovate: datasource=github-releases depName=golangci/golangci-lint
 GOLANGCILINT_VERSION ?= v2.10.1
+# renovate: datasource=github-releases depName=gotestyourself/gotestsum
 GOTESTSUM_VERSION ?= v1.13.0
+# renovate: datasource=github-releases depName=axw/gocov
 GOCOV_VERSION ?= v1.1.0
+# renovate: datasource=github-releases depName=matm/gocov-html
 GOCOV_HTML_VERSION ?= v1.4.0
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
@@ -29,6 +33,7 @@ GOCOVERPKG ?= ./... # Go coverage packages
 # CODECOV_HTMLFILE := build/coverage.html
 
 # gremlins-related variables for mutation test
+# renovate: datasource=github-releases depName=go-gremlins/gremlins
 GOMUTEST_VERSION ?= v0.6.0
 GOMUTESTARGS ?= .
 

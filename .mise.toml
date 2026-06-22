@@ -1,7 +1,8 @@
 [tools]
 go = "1.26.4"
+# renovate: datasource=github-releases depName=goreleaser/goreleaser
 goreleaser = "2.16.0"
-ruby = "3.3.11"
+ruby = "3.4.9"
 
 [settings]
 ruby.compile = false

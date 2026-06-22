@@ -233,6 +233,7 @@ func encodeRegistryAuth(creds resource.RegistryCredentials) (string, error) {
 		Username:      creds.Username,
 		Password:      creds.Password,
 		ServerAddress: creds.Server,
+		IdentityToken: creds.IdentityToken,
 	}
 	return registrytypes.EncodeAuthConfig(authConfig)
 }
