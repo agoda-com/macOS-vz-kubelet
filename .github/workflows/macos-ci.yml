@@ -1,0 +1,556 @@
+name: macOS CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      run_lint:
+        description: "Run lint"
+        type: boolean
+        default: true
+      run_test:
+        description: "Run tests"
+        type: boolean
+        default: true
+      run_e2e:
+        description: "Run E2E tests"
+        type: boolean
+        default: false
+      run_build:
+        description: "Build signed binary"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  GOPATH: ${{ github.workspace }}/.go
+  MISE_CACHE_DIR: ${{ github.workspace }}/.mise/cache
+  MISE_DATA_DIR: ${{ github.workspace }}/.mise/data
+
+jobs:
+  lint:
+    name: lint
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_lint == true) }}
+    runs-on: macos-vz-kubelet-macos
+    timeout-minutes: 30
+    steps:
+      - &checkout
+        name: Checkout
+        uses: actions/checkout@v4
+
+      - &setup_mise
+        name: Set up mise
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="${HOME}/.local/bin:${PATH}"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+          MISE_BIN="$(command -v mise || true)"
+          if [ -z "${MISE_BIN}" ]; then
+            curl -fsS https://mise.run | sh
+            hash -r
+            MISE_BIN="$(command -v mise)"
+          fi
+
+          "${MISE_BIN}" --version
+          "${MISE_BIN}" trust .mise.toml
+
+          "${MISE_BIN}" install
+          eval "$("${MISE_BIN}" activate bash --shims)"
+
+      - name: Generate and format
+        shell: bash
+        run: mise exec -- make generate format
+
+      - name: Verify generated files
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet; then
+            echo "Run make generate format and commit changes."
+            exit 1
+          fi
+
+      - name: Lint
+        shell: bash
+        run: mise exec -- make lint
+
+  test:
+    name: test
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_test == true) }}
+    runs-on: macos-vz-kubelet-macos
+    timeout-minutes: 45
+    env:
+      GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
+      GOCOVERDIR: ${{ github.workspace }}/build/coverage
+      GOCOVEROUT: ${{ github.workspace }}/build/go-cover.out
+      JUNIT_FILE: ${{ github.workspace }}/build/junit.xml
+    steps:
+      - *checkout
+      - *setup_mise
+
+      - name: Test with coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          mise exec -- make integration-test coverage 2>&1 | tee build/coverage.log
+
+      - name: Add coverage to job summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          summary_file="${GITHUB_STEP_SUMMARY:-}"
+          coverage_log="build/coverage.log"
+
+          if [ -z "${summary_file}" ]; then
+            echo "GITHUB_STEP_SUMMARY is not set; skipping coverage summary."
+            exit 0
+          fi
+
+          {
+            echo "### Go coverage"
+            echo
+            if [ ! -s "${coverage_log}" ]; then
+              echo "Coverage log not found at ${coverage_log}."
+            elif coverage_report="$(
+              awk '
+                /[[:space:]][0-9]+([.][0-9]+)?%$/ {
+                  lines[++count] = $0
+                }
+                END {
+                  if (count == 0) {
+                    exit 1
+                  }
+                  start = count > 20 ? count - 19 : 1
+                  for (i = start; i <= count; i++) {
+                    print lines[i]
+                  }
+                }
+              ' "${coverage_log}"
+            )"; then
+              echo '```'
+              printf '%s\n' "${coverage_report}"
+              echo '```'
+            else
+              echo "Coverage lines not found in ${coverage_log}."
+              echo
+              echo '```'
+              tail -n 40 "${coverage_log}" || true
+              echo '```'
+            fi
+          } >> "${summary_file}" || echo "Could not write coverage summary to ${summary_file}."
+
+          exit 0
+
+      - name: Upload test artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: build/junit.xml
+          if-no-files-found: ignore
+
+      - name: Upload test coverage
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-coverage
+          path: |
+            build/coverage
+            build/go-cover.out
+            build/coverage.log
+          if-no-files-found: ignore
+
+  e2e-test:
+    name: e2e-test
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_e2e == true) }}
+    runs-on: [self-hosted, macOS, ARM64, macos-vz-kubelet-e2e]
+    timeout-minutes: 60
+    concurrency:
+      group: macos-vz-kubelet-e2e
+      cancel-in-progress: false
+    env:
+      GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
+      GOCOVERDIR: ${{ github.workspace }}/build/coverage
+      GOCOVEROUT: ${{ github.workspace }}/build/go-cover.out
+      JUNIT_FILE: ${{ github.workspace }}/build/junit.xml
+      APISERVER_CA_CERT_LOCATION: ${{ secrets.E2E_APISERVER_CA_CERT_LOCATION }}
+      APISERVER_CERT_LOCATION: ${{ secrets.E2E_APISERVER_CERT_LOCATION }}
+      APISERVER_KEY_LOCATION: ${{ secrets.E2E_APISERVER_KEY_LOCATION }}
+      VZ_SSH_USER: ${{ secrets.E2E_VZ_SSH_USER }}
+      VZ_SSH_PRIVATE_KEY_BASE64: ${{ secrets.E2E_VZ_SSH_PRIVATE_KEY_BASE64 }}
+      VZ_SSH_PRIVATE_KEY_PATH: ${{ secrets.E2E_VZ_SSH_PRIVATE_KEY_PATH }}
+      E2E_MACOS_IMAGE: ${{ secrets.E2E_MACOS_IMAGE }}
+      E2E_MACOS_IMAGE_DIR: ${{ secrets.E2E_MACOS_IMAGE_DIR }}
+      BUSYBOX_IMAGE: ${{ secrets.E2E_BUSYBOX_IMAGE }}
+      DOCKER_SOCKET_PATH: ${{ secrets.E2E_DOCKER_SOCKET_PATH }}
+      NODE_NAME: macos-vz-kubelet-e2e-test-node-${{ github.run_id }}-${{ github.run_attempt }}
+      VZ_SSH_DIAL_TIMEOUT: ${{ secrets.E2E_VZ_SSH_DIAL_TIMEOUT }}
+      VZ_POSTSTART_TIMEOUT: ${{ secrets.E2E_VZ_POSTSTART_TIMEOUT }}
+    steps:
+      - name: Ensure workspace writable
+        shell: bash
+        run: |
+          if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "${GITHUB_WORKSPACE}" ]; then
+            chmod -R u+w "${GITHUB_WORKSPACE}"
+          fi
+
+      - *checkout
+      - *setup_mise
+
+      - name: Check E2E configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          required=(
+            APISERVER_CA_CERT_LOCATION
+            APISERVER_CERT_LOCATION
+            APISERVER_KEY_LOCATION
+            VZ_SSH_USER
+            E2E_MACOS_IMAGE
+            DOCKER_SOCKET_PATH
+          )
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("${name}")
+            fi
+          done
+          if [ -z "${VZ_SSH_PRIVATE_KEY_BASE64:-}" ] && [ -z "${VZ_SSH_PRIVATE_KEY_PATH:-}" ]; then
+            missing+=("VZ_SSH_PRIVATE_KEY_BASE64 or VZ_SSH_PRIVATE_KEY_PATH")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required E2E configuration: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: E2E test with coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUSYBOX_IMAGE="${BUSYBOX_IMAGE:-busybox:1.37.0}"
+          export VZ_SSH_DIAL_TIMEOUT="${VZ_SSH_DIAL_TIMEOUT:-5s}"
+          export VZ_POSTSTART_TIMEOUT="${VZ_POSTSTART_TIMEOUT:-10s}"
+          docker -H "${DOCKER_SOCKET_PATH}" system prune -af --volumes || true
+          mkdir -p build
+          mise exec -- make e2e-test coverage 2>&1 | tee build/coverage.log
+
+      - name: Clean up canceled E2E node
+        if: ${{ cancelled() }}
+        shell: bash
+        run: |
+          unset KUBECONFIG
+          export KUBECONFIG="${HOME}/.kube/config"
+          kubectl delete node "${NODE_NAME}" --ignore-not-found || true
+
+      - name: Normalize E2E artifacts
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d build ]; then
+            sudo chown -R "$(id -u):$(id -g)" build || true
+            chmod -R u+rwX build || true
+          fi
+
+      - name: Upload E2E artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: build/junit.xml
+          if-no-files-found: ignore
+
+      - name: Upload E2E coverage
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-coverage
+          path: |
+            build/coverage
+            build/go-cover.out
+            build/coverage.log
+          if-no-files-found: ignore
+
+  coverage:
+    name: coverage
+    needs:
+      - test
+      - e2e-test
+    if: ${{ always() && !cancelled() && (needs.test.result != 'skipped' || needs['e2e-test'].result != 'skipped') }}
+    runs-on: macos-vz-kubelet-macos
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      statuses: write
+    env:
+      GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
+    steps:
+      - *checkout
+      - *setup_mise
+
+      - name: Download test coverage
+        if: ${{ needs.test.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: test-coverage
+          path: build/coverage-input/test
+
+      - name: Download E2E coverage
+        if: ${{ needs['e2e-test'].result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-test-coverage
+          path: build/coverage-input/e2e
+
+      - name: Merge coverage
+        id: combined_coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          write_summary() {
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              cat >> "${GITHUB_STEP_SUMMARY}"
+            else
+              cat
+            fi
+          }
+
+          failed_jobs=()
+          if [ "${{ needs.test.result }}" != "success" ] && [ "${{ needs.test.result }}" != "skipped" ]; then
+            failed_jobs+=("test=${{ needs.test.result }}")
+          fi
+          if [ "${{ needs['e2e-test'].result }}" != "success" ] && [ "${{ needs['e2e-test'].result }}" != "skipped" ]; then
+            failed_jobs+=("e2e-test=${{ needs['e2e-test'].result }}")
+          fi
+
+          if [ "${#failed_jobs[@]}" -gt 0 ]; then
+            {
+              echo "### Combined Go coverage"
+              echo
+              printf 'Coverage was not computed because prerequisite jobs did not pass: %s\n' "${failed_jobs[*]}"
+            } | write_summary
+            exit 1
+          fi
+
+          coverage_dirs=()
+          if [ -d build/coverage-input ]; then
+            while IFS= read -r dir; do
+              coverage_dirs+=("${dir}")
+            done < <(find build/coverage-input -type f -name 'covmeta.*' -exec dirname {} \; | sort -u)
+          fi
+
+          if [ "${#coverage_dirs[@]}" -eq 0 ]; then
+            {
+              echo "### Combined Go coverage"
+              echo
+              echo "Coverage was not computed because no raw Go coverage data was found."
+            } | write_summary
+            exit 1
+          fi
+
+          coverage_input="$(IFS=,; printf '%s' "${coverage_dirs[*]}")"
+          rm -rf build/coverage-merged
+          mkdir -p build/coverage-merged
+
+          mise exec -- go tool covdata merge -i="${coverage_input}" -o=build/coverage-merged
+          mise exec -- go tool covdata func -i=build/coverage-merged -pkg="${GOCOVERPKG}" | tee build/coverage-combined.raw.txt
+          mise exec -- go tool covdata textfmt -i=build/coverage-merged -o=build/go-cover-combined.raw.out -pkg="${GOCOVERPKG}"
+
+          coverage_ignore_regex='(^|/)mocks/[^/]+$'
+
+          filter_profile() {
+            local source="$1"
+            local target="$2"
+
+            if [ ! -s "${source}" ]; then
+              return 1
+            fi
+
+            awk -v ignore_regex="${coverage_ignore_regex}" '
+              NR == 1 {
+                print
+                next
+              }
+              {
+                file = $1
+                sub(/:[0-9]+[.][0-9]+,[0-9]+[.][0-9]+$/, "", file)
+                if (file !~ ignore_regex) {
+                  print
+                }
+              }
+            ' "${source}" > "${target}"
+          }
+
+          filter_profile "build/go-cover-combined.raw.out" "build/go-cover-combined.out"
+          mise exec -- go tool cover -func=build/go-cover-combined.out | tee build/coverage-combined.txt
+
+          test_profile="build/coverage-input/test/go-cover.out"
+          if filter_profile "${test_profile}" "build/go-cover-test.out"; then
+            test_profile="build/go-cover-test.out"
+          fi
+
+          e2e_profile="build/coverage-input/e2e/go-cover.out"
+          if filter_profile "${e2e_profile}" "build/go-cover-e2e.out"; then
+            e2e_profile="build/go-cover-e2e.out"
+          fi
+
+          profile_stats() {
+            local label="$1"
+            local profile="$2"
+
+            if [ ! -s "${profile}" ]; then
+              return 1
+            fi
+
+            awk -v label="${label}" '
+              NR == 1 {
+                next
+              }
+              {
+                total += $2
+                if ($3 > 0) {
+                  covered += $2
+                }
+              }
+              END {
+                if (total == 0) {
+                  exit 1
+                }
+                printf "| %s | `%d` | `%d` | `%.1f%%` |\n", label, covered, total, 100 * covered / total
+              }
+            ' "${profile}"
+          }
+
+          combined_all_stats="$(profile_stats "combined (all files)" "build/go-cover-combined.raw.out")"
+          combined_stats="$(profile_stats "combined (reportable)" "build/go-cover-combined.out")"
+          coverage_total="$(awk -F'`' '{ print $6 }' <<< "${combined_stats}")"
+
+          {
+            echo "### Combined Go coverage"
+            echo
+            echo "| Source | Covered statements | Total statements | Coverage |"
+            echo "| --- | ---: | ---: | ---: |"
+            profile_stats "test (reportable)" "${test_profile}" || true
+            profile_stats "e2e-test (reportable)" "${e2e_profile}" || true
+            printf '%s\n' "${combined_all_stats}"
+            printf '%s\n' "${combined_stats}"
+            echo
+            echo 'Reportable coverage excludes generated mock files matching `*/mocks/*`. This remains Go statement coverage, so line-based coverage tools can differ slightly.'
+            echo
+            printf 'Raw coverage directories: `%s`\n' "${#coverage_dirs[@]}"
+            echo
+            echo '```'
+            tail -n 20 build/coverage-combined.txt
+            echo '```'
+          } | write_summary
+
+          echo "coverage=${coverage_total}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload combined coverage
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-coverage
+          path: |
+            build/coverage-merged
+            build/go-cover-combined.raw.out
+            build/go-cover-combined.out
+            build/coverage-combined.raw.txt
+            build/coverage-combined.txt
+          if-no-files-found: ignore
+
+      - name: Publish combined coverage status
+        if: ${{ always() && (github.event_name == 'push' || github.event_name == 'pull_request') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COVERAGE_TOTAL: ${{ steps.combined_coverage.outputs.coverage }}
+        run: |
+          set -euo pipefail
+
+          status_state="failure"
+          status_description="Combined reportable coverage unavailable"
+          if [ -n "${COVERAGE_TOTAL}" ]; then
+            status_state="success"
+            status_description="Combined reportable coverage ${COVERAGE_TOTAL}"
+          fi
+
+          status_target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          status_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${STATUS_SHA}"
+          payload="$(
+            STATUS_STATE="${status_state}" \
+            STATUS_DESCRIPTION="${status_description}" \
+            STATUS_TARGET_URL="${status_target_url}" \
+            ruby -rjson -e '
+              puts JSON.generate({
+                state: ENV.fetch("STATUS_STATE"),
+                target_url: ENV.fetch("STATUS_TARGET_URL"),
+                description: ENV.fetch("STATUS_DESCRIPTION"),
+                context: "coverage/combined",
+              })
+            '
+          )"
+
+          curl -fsS \
+            --retry 5 \
+            --retry-all-errors \
+            --retry-delay 2 \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            "${status_url}" \
+            -d "${payload}"
+
+  build:
+    name: build
+    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_build == true) }}
+    runs-on: macos-vz-kubelet-macos
+    timeout-minutes: 30
+    steps:
+      - *checkout
+      - *setup_mise
+
+      - name: Build signed binary
+        shell: bash
+        run: mise exec -- make build
+
+      - name: Verify build signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="build/MacOSVK"
+
+          test -x "${binary}"
+
+          codesign --verify --verbose=4 "${binary}"
+          entitlements="$(codesign -d --entitlements :- "${binary}" 2>/dev/null)"
+          printf '%s\n' "${entitlements}"
+
+          grep -q "<key>com.apple.security.network.client</key>" <<< "${entitlements}"
+          grep -q "<key>com.apple.security.network.server</key>" <<< "${entitlements}"
+          grep -q "<key>com.apple.security.virtualization</key>" <<< "${entitlements}"
+          if grep -q "<key>com.apple.vm.networking</key>" <<< "${entitlements}"; then
+            echo "Build must not include release networking entitlement."
+            exit 1
+          fi

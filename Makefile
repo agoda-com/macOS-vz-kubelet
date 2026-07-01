@@ -14,7 +14,12 @@ e2e-test: GOTESTARGS += -timeout 15m \
 	$(if $(E2E_MACOS_IMAGE_DIR),--macos-image-dir "$(E2E_MACOS_IMAGE_DIR)") \
 	-exec $(realpath $(dir $(firstword $(MAKEFILE_LIST)))/makefiles/scripts/sign-and-run.sh)
 
-.PHONY: snapshot release
+.PHONY: build snapshot release
+
+build:
+	@mkdir -p "$(ROOT_DIR)/build"
+	go build -gcflags="all=-N -l" -o "$(ROOT_DIR)/build/MacOSVK" ./cmd/virtual-kubelet
+	codesign -s - --entitlements "$(ROOT_DIR)/resources/vz.entitlements" "$(ROOT_DIR)/build/MacOSVK"
 
 snapshot:
 	ROOT_DIR=$(ROOT_DIR) \
