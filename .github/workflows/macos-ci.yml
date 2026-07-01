@@ -43,7 +43,7 @@ jobs:
   lint:
     name: lint
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_lint == true) }}
-    runs-on: macos-vz-kubelet-macos
+    runs-on: macos-runner-set
     timeout-minutes: 30
     steps:
       - &checkout
@@ -92,7 +92,7 @@ jobs:
   test:
     name: test
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_test == true) }}
-    runs-on: macos-vz-kubelet-macos
+    runs-on: macos-runner-set
     timeout-minutes: 45
     env:
       GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
@@ -293,7 +293,7 @@ jobs:
       - test
       - e2e-test
     if: ${{ always() && !cancelled() && (needs.test.result != 'skipped' || needs['e2e-test'].result != 'skipped') }}
-    runs-on: macos-vz-kubelet-macos
+    runs-on: macos-runner-set
     timeout-minutes: 30
     permissions:
       contents: read
@@ -525,7 +525,7 @@ jobs:
   build:
     name: build
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_build == true) }}
-    runs-on: macos-vz-kubelet-macos
+    runs-on: macos-runner-set
     timeout-minutes: 30
     steps:
       - *checkout
