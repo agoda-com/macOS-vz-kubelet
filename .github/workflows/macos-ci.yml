@@ -110,53 +110,6 @@ jobs:
           mkdir -p build
           mise exec -- make integration-test coverage 2>&1 | tee build/coverage.log
 
-      - name: Add coverage to job summary
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          summary_file="${GITHUB_STEP_SUMMARY:-}"
-          coverage_log="build/coverage.log"
-
-          if [ -z "${summary_file}" ]; then
-            echo "GITHUB_STEP_SUMMARY is not set; skipping coverage summary."
-            exit 0
-          fi
-
-          {
-            echo "### Go coverage"
-            echo
-            if [ ! -s "${coverage_log}" ]; then
-              echo "Coverage log not found at ${coverage_log}."
-            elif coverage_report="$(
-              awk '
-                /[[:space:]][0-9]+([.][0-9]+)?%$/ {
-                  lines[++count] = $0
-                }
-                END {
-                  if (count == 0) {
-                    exit 1
-                  }
-                  start = count > 20 ? count - 19 : 1
-                  for (i = start; i <= count; i++) {
-                    print lines[i]
-                  }
-                }
-              ' "${coverage_log}"
-            )"; then
-              echo '```'
-              printf '%s\n' "${coverage_report}"
-              echo '```'
-            else
-              echo "Coverage lines not found in ${coverage_log}."
-              echo
-              echo '```'
-              tail -n 40 "${coverage_log}" || true
-              echo '```'
-            fi
-          } >> "${summary_file}" || echo "Could not write coverage summary to ${summary_file}."
-
-          exit 0
-
       - name: Upload test artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
