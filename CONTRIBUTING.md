@@ -21,13 +21,14 @@ Before opening a pull request, run the commands that match your change and commi
 
 Keep pull requests focused and include tests when changing behavior.
 
-CI runs automatically for branches in this repository. Fork pull requests are welcome, but full CI requires
-self-hosted macOS runners and is not run directly from forks. Maintainers review fork pull requests first and,
-when appropriate, import the exact PR head into a repository branch so the full CI suite can run before merge.
+CI runs automatically for branches in this repository. Fork pull requests are welcome, but end-to-end CI jobs do
+not run directly from cross-repository pull requests. Before merging such a pull request, run the end-to-end jobs
+locally, import the exact PR head into a branch in this repository so CI can run, or let the same coverage run on
+`main` after merge when that risk is acceptable.
 
 ## Maintainer Fork Verification
 
-Use this flow when a fork pull request is ready for full CI verification:
+Use this flow when a fork pull request is ready for repository CI verification:
 
 ```sh
 gh pr checkout <pr-number> -b review/pr-<pr-number>
