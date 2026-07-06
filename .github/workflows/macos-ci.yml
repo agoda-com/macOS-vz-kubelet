@@ -50,13 +50,21 @@ jobs:
         name: Checkout
         uses: actions/checkout@v4
 
+      - &homebrew_path
+        name: Add Homebrew tools to PATH
+        shell: bash
+        run: |
+          if [ -d /opt/homebrew/bin ]; then
+            echo "/opt/homebrew/bin" >> "${GITHUB_PATH}"
+          fi
+
       - &cache_mise
         name: Cache mise tools
         uses: actions/cache@v4
         with:
           path: |
-            ${{ env.MISE_DATA_DIR }}
-            ${{ env.MISE_CACHE_DIR }}
+            .mise/data
+            .mise/cache
           key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml') }}
 
       - &setup_mise
@@ -113,6 +121,7 @@ jobs:
       JUNIT_FILE: ${{ github.workspace }}/build/junit.xml
     steps:
       - *checkout
+      - *homebrew_path
       - *cache_mise
       - *setup_mise
 
@@ -178,6 +187,7 @@ jobs:
           fi
 
       - *checkout
+      - *homebrew_path
       - *cache_mise
       - *setup_mise
 
@@ -270,6 +280,7 @@ jobs:
       GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
     steps:
       - *checkout
+      - *homebrew_path
       - *cache_mise
       - *setup_mise
 
@@ -501,6 +512,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - *checkout
+      - *homebrew_path
       - *cache_mise
       - *setup_mise
 
