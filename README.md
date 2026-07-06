@@ -349,8 +349,8 @@ The [example](example) directory has ready-to-adapt manifests:
 ## Contributing
 
 Issues and contributions are welcome on the
-[GitHub Issues](https://github.com/agoda-com/macOS-vz-kubelet/issues) page. Note that the VM and host packages
-build only on macOS (`darwin/arm64`).
+[GitHub Issues](https://github.com/agoda-com/macOS-vz-kubelet/issues) page. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for development and pull request guidance.
 
 ## Related projects
 
