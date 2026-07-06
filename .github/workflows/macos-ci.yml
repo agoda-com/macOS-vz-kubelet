@@ -50,9 +50,21 @@ jobs:
         name: Checkout
         uses: actions/checkout@v4
 
+      - &cache_mise
+        name: Cache mise tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.MISE_DATA_DIR }}
+            ${{ env.MISE_CACHE_DIR }}
+          key: mise-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.mise.toml') }}
+
       - &setup_mise
         name: Set up mise
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MISE_GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -101,6 +113,7 @@ jobs:
       JUNIT_FILE: ${{ github.workspace }}/build/junit.xml
     steps:
       - *checkout
+      - *cache_mise
       - *setup_mise
 
       - name: Test with coverage
@@ -131,6 +144,7 @@ jobs:
 
   e2e-test:
     name: e2e-test
+    needs: lint
     if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && inputs.run_e2e == true) }}
     runs-on: [self-hosted, macOS, ARM64, macos-vz-kubelet-e2e]
     timeout-minutes: 60
@@ -164,6 +178,7 @@ jobs:
           fi
 
       - *checkout
+      - *cache_mise
       - *setup_mise
 
       - name: Check E2E configuration
@@ -255,6 +270,7 @@ jobs:
       GOCOVERPKG: github.com/agoda-com/macOS-vz-kubelet/...
     steps:
       - *checkout
+      - *cache_mise
       - *setup_mise
 
       - name: Download test coverage
@@ -477,11 +493,15 @@ jobs:
 
   build:
     name: build
+    needs:
+      - lint
+      - test
     if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.run_build == true) }}
     runs-on: macos-runner-set
     timeout-minutes: 30
     steps:
       - *checkout
+      - *cache_mise
       - *setup_mise
 
       - name: Build signed binary
