@@ -1,6 +1,8 @@
 package utils_test
 
 import (
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/agoda-com/macOS-vz-kubelet/internal/utils"
@@ -57,6 +59,18 @@ func TestBuildExportEnvCommand(t *testing.T) {
 	}
 }
 
+func TestBuildExecCommandStringPreservesArgv(t *testing.T) {
+	args := []string{"executable name", "one argument", "it's quoted", "", "$HOME", "*"}
+	cmd := append([]string{"sh", "-c", `printf '%s\0' "$0" "$@"`}, args...)
+
+	command, err := utils.BuildExecCommandString(cmd, nil)
+	assert.NoError(t, err)
+
+	output, err := exec.CommandContext(t.Context(), "sh", "-c", command).Output()
+	assert.NoError(t, err)
+	assert.Equal(t, strings.Join(args, "\x00")+"\x00", string(output))
+}
+
 func TestBuildExecCommandString(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -66,41 +80,41 @@ func TestBuildExecCommandString(t *testing.T) {
 		expectError bool
 	}{
 		{
-			name: "Valid command with environment variables",
-			cmd:  []string{"sh", "-c", "echo Hello"},
+			name: "Command with environment variables",
+			cmd:  []string{"printf", "%s\\n", "hello world"},
 			env: []corev1.EnvVar{
 				{Name: "FOO", Value: "bar"},
 				{Name: "BAZ", Value: "qux"},
 			},
-			expected:    "export FOO=\"bar\"\nexport BAZ=\"qux\"\nsh -c $'echo Hello'",
+			expected:    "export FOO=\"bar\"\nexport BAZ=\"qux\"\nexec 'printf' '%s\\n' 'hello world'",
 			expectError: false,
 		},
 		{
-			name:        "Invalid command (less than 3 elements)",
-			cmd:         []string{"sh", "-c"},
+			name:        "Empty command",
+			cmd:         nil,
 			env:         []corev1.EnvVar{},
 			expected:    "",
 			expectError: true,
 		},
 		{
-			name:        "Invalid command (second element is not -c)",
-			cmd:         []string{"sh", "-x", "echo Hello"},
+			name:        "Empty executable",
+			cmd:         []string{"", "argument"},
 			env:         []corev1.EnvVar{},
 			expected:    "",
 			expectError: true,
 		},
 		{
-			name:        "Command with additional arguments",
-			cmd:         []string{"sh", "-c", "echo Hello", "arg1", "arg2"},
+			name:        "Arguments preserve spaces quotes and empty values",
+			cmd:         []string{"printf", "%s\\n", "one argument", "it's quoted", ""},
 			env:         []corev1.EnvVar{},
-			expected:    "sh -c $'echo Hello' \"arg1\" \"arg2\"",
+			expected:    "exec 'printf' '%s\\n' 'one argument' 'it'\"'\"'s quoted' ''",
 			expectError: false,
 		},
 		{
-			name:        "Command with no additional arguments",
-			cmd:         []string{"sh", "-c", "echo Hello"},
+			name:        "Shell metacharacters remain argument data",
+			cmd:         []string{"printf", "%s", "$(touch /tmp/unwanted); *"},
 			env:         []corev1.EnvVar{},
-			expected:    "sh -c $'echo Hello'",
+			expected:    "exec 'printf' '%s' '$(touch /tmp/unwanted); *'",
 			expectError: false,
 		},
 	}

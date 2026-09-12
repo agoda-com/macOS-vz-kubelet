@@ -107,15 +107,12 @@ func TestParseStatsJSON(t *testing.T) {
 	assert.Equal(t, uint64(5), *parsed.MemoryWorkingSetBytes)
 }
 
-// runStatsScriptViaShell runs cmd the way the guest does in Mode B: sh reads the
-// statements from stdin (one per line), mirroring internal/ssh ExecuteCommand's
-// shell path. stdout and stderr are kept separate, as production does. Returns stdout.
+// runStatsScriptViaShell runs the generated sh argv locally. stdout and stderr
+// are kept separate, as production does. Returns stdout.
 func runStatsScriptViaShell(t *testing.T, cmd []string) []byte {
 	t.Helper()
-	// sh, not the guest login shell: the stats script is pure POSIX, so any POSIX
-	// shell validates it; this mirrors the Mode-B stdin path in internal/ssh.
-	c := exec.CommandContext(t.Context(), "sh")
-	c.Stdin = strings.NewReader(strings.Join(cmd, "\n") + "\n")
+	require.NotEmpty(t, cmd)
+	c := exec.CommandContext(t.Context(), cmd[0], cmd[1:]...)
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout
 	c.Stderr = &stderr
@@ -123,15 +120,13 @@ func runStatsScriptViaShell(t *testing.T, cmd []string) []byte {
 	return stdout.Bytes()
 }
 
-// The stats command MUST stay Mode B (separate statements over stdin). If a future
-// edit collapses it to ["sh","-c",script], BuildExecCommandString would $'...'-wrap
-// it and break the embedded awk/perl single quotes. BuildExecCommandString returning
-// an error proves the command does NOT match the Mode-A sh -c shape.
-func TestBuildVMStatsCommandStaysModeB(t *testing.T) {
+func TestBuildVMStatsCommandUsesShellArgv(t *testing.T) {
 	cmd := buildVMStatsCommand()
-	require.NotEmpty(t, cmd)
-	_, err := utils.BuildExecCommandString(cmd, nil)
-	require.Error(t, err, "stats command must remain Mode-B; Mode-A $'...' would break its single-quoted awk/perl")
+	require.Len(t, cmd, 3)
+	require.Equal(t, []string{"sh", "-c"}, cmd[:2])
+	command, err := utils.BuildExecCommandString(cmd, nil)
+	require.NoError(t, err)
+	require.Contains(t, command, `'BEGIN{dt=t2-t1;`)
 }
 
 // TestVMStatsCommandExecutesOnHost runs the real stats script on the macOS host

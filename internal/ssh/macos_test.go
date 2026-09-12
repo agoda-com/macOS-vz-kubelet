@@ -23,18 +23,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// execModeServer is an in-process SSH server (x/crypto/ssh server side) that exercises
-// MacOSSession.ExecuteCommand without real infra, recording how the client drove the
-// session so the two execution shapes can be told apart:
-//
-//   - MODE-A (single-exec): one "exec" request carrying the built command string. The
-//     server records it and replies with a configurable exit status. Proves Mode-A routing
-//     and that the built string (env exports + sh -c $'...') went out verbatim.
-//   - MODE-B (stdin login-shell fallback): one "shell" request, then env-export and command
-//     lines written to channel stdin and closed (EOF). The server records every line in
-//     order and emulates a login shell's "exit == status of the LAST command": trailing
-//     line == `false` -> 1, else 0, so the masking contract is testable.
-//
+// execModeServer is an in-process SSH server that records the command string
+// carried by an exec request and replies with a configurable exit status.
 // Server goroutines must not call t.Fatal/require (Goexit on the wrong goroutine); errs are
 // drained in Cleanup, mirroring the sshconn testserver pattern.
 type execModeServer struct {
@@ -42,17 +32,14 @@ type execModeServer struct {
 	listener net.Listener
 	config   *ssh.ServerConfig
 
-	// execExitStatus is the exit status returned for a Mode-A "exec" request.
+	// execExitStatus is the exit status returned for an "exec" request.
 	execExitStatus uint32
 
 	mu sync.Mutex
-	// reqType is the channel request the client issued ("exec" or "shell").
+	// reqType is the channel request the client issued.
 	reqType string
-	// execCommand is the command string carried by a Mode-A "exec" request.
+	// execCommand is the command string carried by an "exec" request.
 	execCommand string
-	// shellLines are the lines written to channel stdin during a Mode-B
-	// "shell" session, in the order received.
-	shellLines []string
 
 	errs chan error
 
@@ -62,7 +49,7 @@ type execModeServer struct {
 
 // newExecModeServer starts a server on 127.0.0.1:0 with an in-test-generated
 // ed25519 host key and NoClientAuth. execExitStatus is the status returned for a
-// Mode-A "exec" request (Mode-B derives its status from the last line).
+// "exec" request.
 func newExecModeServer(t *testing.T, execExitStatus uint32) *execModeServer {
 	t.Helper()
 
@@ -110,27 +97,18 @@ func newExecModeServer(t *testing.T, execExitStatus uint32) *execModeServer {
 // Addr returns the server's listen address.
 func (s *execModeServer) Addr() string { return s.listener.Addr().String() }
 
-// ReqType returns the channel request type the client issued ("exec"/"shell").
+// ReqType returns the channel request type the client issued.
 func (s *execModeServer) ReqType() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.reqType
 }
 
-// ExecCommand returns the command string carried by a Mode-A "exec" request.
+// ExecCommand returns the command string carried by an "exec" request.
 func (s *execModeServer) ExecCommand() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.execCommand
-}
-
-// ShellLines returns the ordered lines received over a Mode-B "shell" session.
-func (s *execModeServer) ShellLines() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.shellLines))
-	copy(out, s.shellLines)
-	return out
 }
 
 // Close stops the listener. Idempotent.
@@ -192,10 +170,7 @@ type exitStatusPayload struct {
 	Status uint32
 }
 
-// handleSession services one session channel. For "exec" it records the command and
-// replies execExitStatus. For "shell" it reads stdin until EOF (the client signals it by
-// closing its stdin pipe -> SSH CloseWrite), records each line, and returns the emulated
-// login-shell status from the last line. See drainShellStdin for the exit oracle.
+// handleSession records an exec command and replies with execExitStatus.
 func (s *execModeServer) handleSession(nc ssh.NewChannel) {
 	ch, reqs, err := nc.Accept()
 	if err != nil {
@@ -224,58 +199,12 @@ func (s *execModeServer) handleSession(nc ssh.NewChannel) {
 			}
 			s.sendExit(ch, s.execExitStatus)
 			return
-		case "shell":
-			s.mu.Lock()
-			s.reqType = "shell"
-			s.mu.Unlock()
-			if req.WantReply {
-				_ = req.Reply(true, nil)
-			}
-			// Read all stdin lines until the client closes the pipe (EOF),
-			// then derive the login-shell exit status from the last line.
-			status := s.drainShellStdin(ch)
-			s.sendExit(ch, status)
-			return
 		default:
 			if req.WantReply {
 				_ = req.Reply(false, nil)
 			}
 		}
 	}
-}
-
-// drainShellStdin reads stdin to EOF, records each line in order, and returns the emulated
-// login-shell exit status.
-//
-// The exit oracle is deliberately narrow: it models the one load-bearing contract, "exit ==
-// status of the LAST command", with a single fixed failure token (trimmed last line ==
-// "false" -> 1, else 0). It is not a shell interpreter. Future Mode-B cases must stay within
-// this model: e.g. do NOT expect `exit 5` -> 5, which this oracle silently scores 0.
-func (s *execModeServer) drainShellStdin(ch ssh.Channel) uint32 {
-	data, err := io.ReadAll(ch)
-	if err != nil {
-		s.recordErr(err)
-	}
-
-	var lines []string
-	for _, line := range strings.Split(string(data), "\n") {
-		// Each entry is newline-terminated, so the final Split element is empty; drop
-		// empties to keep the recorded lines faithful to what was sent.
-		if line == "" {
-			continue
-		}
-		lines = append(lines, line)
-	}
-
-	s.mu.Lock()
-	s.shellLines = lines
-	s.mu.Unlock()
-
-	status := uint32(0)
-	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "false" {
-		status = 1
-	}
-	return status
 }
 
 func (s *execModeServer) sendExit(ch ssh.Channel, status uint32) {
@@ -331,31 +260,27 @@ func execCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// (1) Mode-A routing + success: a shell-exec argv routes through one "exec" request
-// carrying the verbatim built string, and a zero exit yields nil.
-func TestExecuteCommand_ModeA_RoutesExecAndSucceeds(t *testing.T) {
+func TestExecuteCommand_RoutesArgvThroughExec(t *testing.T) {
 	srv := newExecModeServer(t, 0)
 	sess := newMacOSSession(t, srv, node.DiscardingExecIO())
 
-	cmd := []string{"sh", "-c", "echo hi"}
+	cmd := []string{"printf", "%s\n", "hello world", "it's quoted"}
 	err := sess.ExecuteCommand(execCtx(t), nil, cmd)
 	require.NoError(t, err)
 
 	want, buildErr := utils.BuildExecCommandString(cmd, nil)
-	require.NoError(t, buildErr, "precondition: this argv must build a Mode-A string")
-	assert.Equal(t, "exec", srv.ReqType(), "a shell-exec argv must route through a single exec request")
+	require.NoError(t, buildErr)
+	assert.Equal(t, "exec", srv.ReqType())
 	assert.Equal(t, want, srv.ExecCommand(),
 		"the exec request must carry the verbatim BuildExecCommandString output")
 }
 
-// (2) Mode-A with env: the built exec string carries the env-export prefix ahead of the
-// sh -c body.
-func TestExecuteCommand_ModeA_PrependsEnvExports(t *testing.T) {
+func TestExecuteCommand_PrependsEnvExports(t *testing.T) {
 	srv := newExecModeServer(t, 0)
 	sess := newMacOSSession(t, srv, node.DiscardingExecIO())
 
 	env := []corev1.EnvVar{{Name: "FOO", Value: "bar"}}
-	cmd := []string{"sh", "-c", "echo hi"}
+	cmd := []string{"printenv", "FOO"}
 	err := sess.ExecuteCommand(execCtx(t), env, cmd)
 	require.NoError(t, err)
 
@@ -363,13 +288,11 @@ func TestExecuteCommand_ModeA_PrependsEnvExports(t *testing.T) {
 	got := srv.ExecCommand()
 	assert.True(t, strings.HasPrefix(got, "export FOO=\"bar\"\n"),
 		"exec command must begin with the env-export prefix, got %q", got)
-	assert.Contains(t, got, "sh -c $'echo hi'",
-		"exec command must still carry the sh -c body after the exports, got %q", got)
+	assert.Contains(t, got, "exec 'printenv' 'FOO'",
+		"exec command must carry the quoted argv after the exports, got %q", got)
 }
 
-// (3) Mode-A non-zero exit surfaces as the raw *ssh.ExitError (CodeExitError wrapping
-// happens in the caller, not here).
-func TestExecuteCommand_ModeA_NonZeroExitSurfacesExitError(t *testing.T) {
+func TestExecuteCommand_NonZeroExitSurfacesExitError(t *testing.T) {
 	srv := newExecModeServer(t, 3)
 	sess := newMacOSSession(t, srv, node.DiscardingExecIO())
 
@@ -384,71 +307,4 @@ func TestExecuteCommand_ModeA_NonZeroExitSurfacesExitError(t *testing.T) {
 	require.True(t, errors.As(err, &exitErr),
 		"ExecuteCommand must surface the raw *ssh.ExitError, got %T: %v", err, err)
 	assert.Equal(t, 3, exitErr.ExitStatus(), "the surfaced error must carry the server exit status")
-}
-
-// (4) Mode-B routing: a non shell-exec argv (the real gitlab-runner prod hook shape) falls
-// back to one "shell" request with the lines in order; a non-`false` last line yields nil.
-func TestExecuteCommand_ModeB_RoutesShellAndDeliversLinesInOrder(t *testing.T) {
-	srv := newExecModeServer(t, 0)
-	sess := newMacOSSession(t, srv, node.DiscardingExecIO())
-
-	cmd := []string{"mkdir -p /tmp/x", "networksetup -setproxyautodiscovery Ethernet on"}
-	err := sess.ExecuteCommand(execCtx(t), nil, cmd)
-	require.NoError(t, err)
-
-	assert.Equal(t, "shell", srv.ReqType(),
-		"a non shell-exec argv must fall back to a shell session, not exec")
-	assert.Equal(t, cmd, srv.ShellLines(),
-		"both command lines must arrive over stdin in order")
-}
-
-// (5) Mode-B masking (the load-bearing contract) plus negative control. A login shell
-// reading stdin returns the LAST line's status; earlier failures are masked. So
-// ["false","true"] succeeds and ["true","false"] fails.
-func TestExecuteCommand_ModeB_OnlyLastLineGates(t *testing.T) {
-	t.Run("earlier failure is masked by a passing last line", func(t *testing.T) {
-		srv := newExecModeServer(t, 0)
-		sess := newMacOSSession(t, srv, node.DiscardingExecIO())
-
-		cmd := []string{"false", "true"}
-		err := sess.ExecuteCommand(execCtx(t), nil, cmd)
-		require.NoError(t, err,
-			"only the last line gates: a failing earlier line must be masked")
-
-		assert.Equal(t, "shell", srv.ReqType())
-		assert.Equal(t, cmd, srv.ShellLines())
-	})
-
-	t.Run("a failing last line gates", func(t *testing.T) {
-		srv := newExecModeServer(t, 0)
-		sess := newMacOSSession(t, srv, node.DiscardingExecIO())
-
-		cmd := []string{"true", "false"}
-		err := sess.ExecuteCommand(execCtx(t), nil, cmd)
-		require.Error(t, err, "a failing last line must gate and surface an error")
-
-		var exitErr *ssh.ExitError
-		require.True(t, errors.As(err, &exitErr),
-			"the last-line failure must surface as *ssh.ExitError, got %T: %v", err, err)
-		assert.Equal(t, 1, exitErr.ExitStatus())
-		assert.Equal(t, "shell", srv.ReqType())
-		assert.Equal(t, cmd, srv.ShellLines())
-	})
-}
-
-// (6) Mode-B env export: env vars are written as `export NAME="VALUE"` lines ahead of the
-// command lines.
-func TestExecuteCommand_ModeB_WritesEnvExportsBeforeCommands(t *testing.T) {
-	srv := newExecModeServer(t, 0)
-	sess := newMacOSSession(t, srv, node.DiscardingExecIO())
-
-	env := []corev1.EnvVar{{Name: "FOO", Value: "bar"}}
-	cmd := []string{"mkdir -p /tmp/x", "true"}
-	err := sess.ExecuteCommand(execCtx(t), env, cmd)
-	require.NoError(t, err)
-
-	assert.Equal(t, "shell", srv.ReqType())
-	want := []string{"export FOO=\"bar\"", "mkdir -p /tmp/x", "true"}
-	assert.Equal(t, want, srv.ShellLines(),
-		"env-export lines must precede the command lines, in order")
 }

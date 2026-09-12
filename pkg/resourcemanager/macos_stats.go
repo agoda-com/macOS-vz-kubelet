@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	vzio "github.com/agoda-com/macOS-vz-kubelet/internal/io"
@@ -14,11 +15,9 @@ import (
 	stats "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
 )
 
-// buildVMStatsCommand returns the macOS guest stats script as a Mode-B command
-// (a list of separate shell statements written to the guest shell stdin, NOT an
-// ["sh","-c",...] exec): the embedded awk/perl/JXA single quotes only survive
-// Mode B, because the sh -c path ($'...') in internal/utils.BuildExecCommandString
-// does not escape them.
+// buildVMStatsCommand returns the macOS guest stats script as a standard
+// ["sh", "-c", script] argv. Exec treats every command slice as argv, so a
+// multi-statement script must select a shell explicitly.
 //
 // macOS exposes NO cumulative CPU counter via sysctl/CLI (kern.cp_time is FreeBSD-only).
 // HOST_CPU_LOAD_INFO - the tick counter top/Activity Monitor read - is reachable only via
@@ -31,7 +30,7 @@ import (
 // Silicon = 16384, not 4096); vm_stat run ONCE. Memory: Usage = active+inactive+wired+
 // compressor (matches top "used"); WorkingSet excludes reclaimable inactive; both x pageSize.
 func buildVMStatsCommand() []string {
-	return []string{
+	steps := []string{
 		`JXA='ObjC.import("Foundation"); ObjC.bindFunction("mach_host_self",["unsigned int",[]]); ObjC.bindFunction("host_statistics",["int",["unsigned int","int","void *","void *"]]); var info=$.NSMutableData.dataWithLength(16); var cnt=$.NSMutableData.alloc.initWithBase64EncodedStringOptions($("BAAAAA=="),0); $.host_statistics($.mach_host_self(),3,info.mutableBytes,cnt.mutableBytes); ObjC.unwrap(info.base64EncodedStringWithOptions(0));'`,
 		`clkTck=$(getconf CLK_TCK)`,
 		`b1=$(osascript -l JavaScript -e "$JXA"); t1=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')`,
@@ -53,6 +52,7 @@ func buildVMStatsCommand() []string {
 		`memoryRssBytes=$(( active * pageSize ))`,
 		`echo "{\"cpuUsageNanoCores\": $cpuUsageNanoCores, \"cpuUsageCoreNanoSeconds\": $cpuUsageCoreNanoSeconds, \"memoryUsageBytes\": $memoryUsageBytes, \"memoryRssBytes\": $memoryRssBytes, \"memoryWorkingSetBytes\": $memoryWorkingSetBytes}"`,
 	}
+	return []string{"sh", "-c", strings.Join(steps, "\n")}
 }
 
 // GetVirtualMachineStats retrieves the stats of the specified virtual machine.

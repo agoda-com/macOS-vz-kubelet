@@ -179,9 +179,8 @@ func (s *providerSuite) assertMacOSIdleCPU(t *testing.T, podName string) {
 func (s *providerSuite) assertMacOSMemoryGroundTruth(t *testing.T, podName string) {
 	t.Helper()
 
-	// Single-quote-free command: execContainer routes through BuildExecCommandString, which
-	// wraps an `sh -c` exec in $'...' WITHOUT escaping single quotes, so an in-guest awk program
-	// would break the quoting. Fetch the raw page size + vm_stat and recompute in Go instead.
+	// Fetch the raw page size + vm_stat and recompute in Go so this remains an
+	// independent check of the provider's stats calculation.
 	stdout, _, err := s.execContainer(t.Context(), podName, "macos", []string{"/bin/sh", "-c", "sysctl -n vm.pagesize; vm_stat"})
 	require.NoError(t, err, "failed to read guest vm_stat")
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")

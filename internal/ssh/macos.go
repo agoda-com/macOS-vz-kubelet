@@ -48,35 +48,15 @@ func (s *MacOSSession) SetupSessionIO(ctx context.Context) error {
 
 // ExecuteCommand executes the provided command in the SSH session.
 func (s *MacOSSession) ExecuteCommand(ctx context.Context, env []corev1.EnvVar, cmd []string) error {
-	// Attempt to build exec command string, if successful, start the session
-	// Otherwise, start a shell session and write the command to the stdinPipe
-	if cmdStr, err := utils.BuildExecCommandString(cmd, env); err == nil {
-		if err := s.Start(cmdStr); err != nil {
-			return err
-		}
-	} else {
-		// If TTY is not enabled, start a shell session
-		// and write the command to the stdinPipe
-		// to avoid having to escape special characters
-		if err := s.Shell(); err != nil {
-			return err
-		}
-
-		// Prepare environment variables
-		for _, e := range env {
-			if _, err := s.stdinPipe.Write([]byte(utils.BuildExportEnvCommand(e))); err != nil {
-				// Right now skipping on environment variable is not a critical error
-				// but something to be aware of
-				log.G(ctx).WithError(err).Warnf("Failed to write environment variable to stdin pipe")
-			}
-		}
-
-		// Write the command to the stdinPipe
-		for _, c := range cmd {
-			if _, err := s.stdinPipe.Write([]byte(c + "\n")); err != nil {
-				return err
-			}
-		}
+	// Kubernetes defines cmd as an executable followed by its arguments. Do not
+	// treat individual elements as shell input lines; callers that need shell
+	// syntax must request it explicitly with an argv such as ["sh", "-c", script].
+	cmdStr, err := utils.BuildExecCommandString(cmd, env)
+	if err != nil {
+		return err
+	}
+	if err := s.Start(cmdStr); err != nil {
+		return err
 	}
 
 	if s.attach.TTY() {

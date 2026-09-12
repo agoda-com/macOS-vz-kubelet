@@ -22,12 +22,12 @@ func BuildExportEnvCommand(env corev1.EnvVar) string {
 	return fmt.Sprintf("export %s=%s\n", env.Name, value)
 }
 
-// BuildExecCommandString returns a shell command that executes the given command in a shell.
-// The command is formatted as "sh -c $'COMMAND'" where COMMAND is the given command string.
-// If the command has arguments, they are appended to the command string.
+// BuildExecCommandString serializes a Kubernetes command argv for an SSH exec
+// request. SSH carries a command string rather than an argv, so every argument
+// is POSIX shell-quoted before the remote login shell parses it.
 func BuildExecCommandString(cmd []string, env []corev1.EnvVar) (string, error) {
-	if len(cmd) < 3 || cmd[1] != "-c" {
-		return "", fmt.Errorf("command is not a shell exec command")
+	if len(cmd) == 0 || cmd[0] == "" {
+		return "", fmt.Errorf("command argv is empty")
 	}
 
 	cmdStr := ""
@@ -35,15 +35,14 @@ func BuildExecCommandString(cmd []string, env []corev1.EnvVar) (string, error) {
 		cmdStr += BuildExportEnvCommand(e)
 	}
 
-	// If the -c option is present, then commands are read from string.
-	cmdStr += cmd[0] + " " + cmd[1] // e.g. "sh -c"
-	cmdStr += fmt.Sprintf(" $'%s'", cmd[2])
-
-	// If there are arguments after the string, they are assigned to the positional parameters, starting with $0.
-	for i := 3; i < len(cmd); i++ {
-		// add arguments to sh -c command if any
-		cmdStr += " " + strconv.Quote(cmd[i])
+	cmdStr += "exec"
+	for _, arg := range cmd {
+		cmdStr += " " + shellQuote(arg)
 	}
 
 	return cmdStr, nil
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
