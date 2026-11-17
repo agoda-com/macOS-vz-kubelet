@@ -9,6 +9,20 @@ import (
 
 // defining metrics
 var (
+	nodeCPUUsageDesc = compbasemetrics.NewDesc("node_cpu_usage_seconds_total",
+		"Cumulative cpu time consumed by the node in core-seconds",
+		nil,
+		nil,
+		compbasemetrics.ALPHA,
+		"")
+
+	nodeMemoryUsageDesc = compbasemetrics.NewDesc("node_memory_working_set_bytes",
+		"Current working set of the node in bytes",
+		nil,
+		nil,
+		compbasemetrics.ALPHA,
+		"")
+
 	containerCPUUsageDesc = compbasemetrics.NewDesc("container_cpu_usage_seconds_total",
 		"Cumulative cpu time consumed by the container in core-seconds",
 		[]string{"container", "pod", "namespace"},
@@ -50,6 +64,8 @@ var _ compbasemetrics.StableCollector = &resourceMetricsCollector{}
 
 // DescribeWithStability implements compbasemetrics.StableCollector
 func (rc *resourceMetricsCollector) DescribeWithStability(ch chan<- *compbasemetrics.Desc) {
+	ch <- nodeCPUUsageDesc
+	ch <- nodeMemoryUsageDesc
 	ch <- containerCPUUsageDesc
 	ch <- containerMemoryUsageDesc
 	ch <- resourceScrapeResultDesc
@@ -66,6 +82,8 @@ func (rc *resourceMetricsCollector) CollectWithStability(ch chan<- compbasemetri
 	}()
 
 	statsSummary := *rc.providerPodStats
+	rc.collectNodeCPUMetrics(ch, statsSummary.Node)
+	rc.collectNodeMemoryMetrics(ch, statsSummary.Node)
 	for _, pod := range statsSummary.Pods {
 		for _, container := range pod.Containers {
 			rc.collectContainerCPUMetrics(ch, pod, container)
@@ -75,6 +93,26 @@ func (rc *resourceMetricsCollector) CollectWithStability(ch chan<- compbasemetri
 }
 
 // implement collector methods and validate that correct data is used
+
+func (rc *resourceMetricsCollector) collectNodeCPUMetrics(ch chan<- compbasemetrics.Metric, s stats.NodeStats) {
+	if s.CPU == nil || s.CPU.UsageCoreNanoSeconds == nil {
+		return
+	}
+
+	ch <- compbasemetrics.NewLazyMetricWithTimestamp(s.CPU.Time.Time,
+		compbasemetrics.NewLazyConstMetric(nodeCPUUsageDesc, compbasemetrics.CounterValue,
+			float64(*s.CPU.UsageCoreNanoSeconds)/float64(time.Second)))
+}
+
+func (rc *resourceMetricsCollector) collectNodeMemoryMetrics(ch chan<- compbasemetrics.Metric, s stats.NodeStats) {
+	if s.Memory == nil || s.Memory.WorkingSetBytes == nil {
+		return
+	}
+
+	ch <- compbasemetrics.NewLazyMetricWithTimestamp(s.Memory.Time.Time,
+		compbasemetrics.NewLazyConstMetric(nodeMemoryUsageDesc, compbasemetrics.GaugeValue,
+			float64(*s.Memory.WorkingSetBytes)))
+}
 
 func (rc *resourceMetricsCollector) collectContainerCPUMetrics(ch chan<- compbasemetrics.Metric, pod stats.PodStats, s stats.ContainerStats) {
 	if s.CPU == nil || s.CPU.UsageCoreNanoSeconds == nil {
