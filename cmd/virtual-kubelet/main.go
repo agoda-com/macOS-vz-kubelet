@@ -267,9 +267,8 @@ func withCA(cfg *tls.Config) error {
 }
 
 func run(ctx context.Context, c kubernetes.Interface) error {
-	// A zero interval would make the node controller write the node status in a tight loop.
-	if nodeStatusUpdateInterval <= 0 {
-		return fmt.Errorf("node status update interval must be positive, got %s", nodeStatusUpdateInterval)
+	if err := validateNodeStatusUpdateInterval(nodeStatusUpdateInterval); err != nil {
+		return err
 	}
 
 	service := nodeName
@@ -462,16 +461,35 @@ func envOrDefault(key string, defaultValue string) string {
 	return defaultValue
 }
 
+// envDurationOrDefault is used while the flags are defined, before the logger is set up (log.L is still a
+// no-op logger then), so an invalid value is reported on stderr.
 func envDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
-	v, set := os.LookupEnv(key)
-	if !set {
-		return defaultValue
-	}
-	d, err := time.ParseDuration(v)
+	d, err := parseDurationEnv(key, defaultValue)
 	if err != nil {
-		// This runs while the flags are defined, before the logger is set up (log.L is still a no-op logger).
-		fmt.Fprintf(os.Stderr, "invalid duration %q for %s: %v\n", v, key, err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 	return d
+}
+
+// parseDurationEnv returns the duration in the environment variable key, or defaultValue when it is not set.
+func parseDurationEnv(key string, defaultValue time.Duration) (time.Duration, error) {
+	v, set := os.LookupEnv(key)
+	if !set {
+		return defaultValue, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q for %s: %w", v, key, err)
+	}
+	return d, nil
+}
+
+// validateNodeStatusUpdateInterval rejects intervals that are not positive: a zero interval would make the node
+// controller write the node status in a tight loop.
+func validateNodeStatusUpdateInterval(d time.Duration) error {
+	if d <= 0 {
+		return fmt.Errorf("node status update interval must be positive, got %s", d)
+	}
+	return nil
 }
