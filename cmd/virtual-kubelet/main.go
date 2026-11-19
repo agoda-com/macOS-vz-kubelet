@@ -66,6 +66,10 @@ var (
 	resync          time.Duration = 1 * time.Minute
 	providerID      string
 
+	// how often the full node status is written to the API server, node liveness is
+	// reported separately through the lease (renewed every 10s) so this can be long
+	nodeStatusUpdateInterval = node.DefaultStatusUpdateInterval
+
 	certPath       = os.Getenv("APISERVER_CERT_LOCATION")
 	keyPath        = os.Getenv("APISERVER_KEY_LOCATION")
 	clientCACert   string
@@ -144,6 +148,7 @@ func main() {
 	flags.StringVar(&logLevel, "log-level", logLevel, "log level.")
 	flags.IntVar(&numberOfWorkers, "pod-sync-workers", numberOfWorkers, `set the number of pod synchronization workers`)
 	flags.DurationVar(&resync, "full-resync-period", resync, "how often to perform a full resync of pods between kubernetes and the provider")
+	flags.DurationVar(&nodeStatusUpdateInterval, "node-status-update-interval", envDurationOrDefault("VZ_NODE_STATUS_UPDATE_INTERVAL", nodeStatusUpdateInterval), "how often to update the node status in the API server, liveness is reported separately via the node lease")
 
 	flags.StringVar(&clientCACert, "client-verify-ca", os.Getenv("APISERVER_CA_CERT_LOCATION"), "CA cert to use to verify client requests")
 	flags.BoolVar(&clientNoVerify, "no-verify-clients", clientNoVerify, "Do not require client certificate validation")
@@ -262,6 +267,11 @@ func withCA(cfg *tls.Config) error {
 }
 
 func run(ctx context.Context, c kubernetes.Interface) error {
+	// A zero interval would make the node controller write the node status in a tight loop.
+	if nodeStatusUpdateInterval <= 0 {
+		return fmt.Errorf("node status update interval must be positive, got %s", nodeStatusUpdateInterval)
+	}
+
 	service := nodeName
 	if serviceName := os.Getenv("OTEL_SERVICE_NAME"); serviceName != "" {
 		service = serviceName
@@ -299,6 +309,10 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 			certWatcherErrCh <- fmt.Errorf("certificate watcher failed: %w", err)
 		}
 	}()
+
+	// nodeutil.NewNode does not expose the node controller options, so this is applied to
+	// the constructed controller below (built here, before the node variable shadows the package)
+	statusIntervalOpt := node.WithNodeStatusUpdateInterval(nodeStatusUpdateInterval)
 
 	node, err := nodeutil.NewNode(nodeName,
 		func(cfg nodeutil.ProviderConfig) (nodeutil.Provider, node.NodeProvider, error) {
@@ -391,6 +405,10 @@ func run(ctx context.Context, c kubernetes.Interface) error {
 		return err
 	}
 
+	if err := statusIntervalOpt(node.NodeController()); err != nil {
+		return fmt.Errorf("error setting node status update interval: %w", err)
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- node.Run(ctx)
@@ -442,4 +460,18 @@ func envOrDefault(key string, defaultValue string) string {
 		return v
 	}
 	return defaultValue
+}
+
+func envDurationOrDefault(key string, defaultValue time.Duration) time.Duration {
+	v, set := os.LookupEnv(key)
+	if !set {
+		return defaultValue
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		// This runs while the flags are defined, before the logger is set up (log.L is still a no-op logger).
+		fmt.Fprintf(os.Stderr, "invalid duration %q for %s: %v\n", v, key, err)
+		os.Exit(2)
+	}
+	return d
 }
