@@ -34,6 +34,12 @@ type MacOSVZPodMetricsProvider struct {
 	// UID so same-name recreation is a distinct pod. Guarded by metricsSync, but only
 	// ever touched in the post-Wait single-threaded section, never by the g.Go closures.
 	failingPods map[types.UID]struct{}
+
+	// host reads the host's own usage for the node stats.
+	host hostStatsSource
+	// prevCPU is the previous host CPU reading, used to derive the current usage rate.
+	// Guarded by metricsSync.
+	prevCPU *cpuReading
 }
 
 // NewMacOSVZPodMetricsProvider creates a new MacOSVZPodMetricsProvider
@@ -43,6 +49,7 @@ func NewMacOSVZPodMetricsProvider(nodeName string, podLister corev1listers.PodLi
 		podLister:   podLister,
 		vzClient:    vzClient,
 		failingPods: make(map[types.UID]struct{}),
+		host:        gopsutilHost{fsPath: "/"},
 	}
 }
 
@@ -152,9 +159,7 @@ func (p *MacOSVZPodMetricsProvider) GetStatsSummary(ctx context.Context) (summar
 	}
 
 	var s stats.Summary
-	s.Node = stats.NodeStats{
-		NodeName: p.nodeName,
-	}
+	s.Node = p.nodeStats(ctx)
 
 	// Edge-triggered skip logging, single-threaded under metricsSync: log on the
 	// rising (newly failing) and falling (recovered) edges only. Rebuild the set from
