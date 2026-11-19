@@ -135,11 +135,12 @@ func (i *VirtualMachineInstance) retrieveIPAddress(ctx context.Context) (err err
 		log.G(ctx).WithError(err).Warn("Unable to capture IP using tcpdump")
 	}
 
-	// Attempt to retrieve the IP address from the ARP table
-	ip, err := netutil.RetrieveIPFromARPTable(ctx, i.macAddr)
+	// Look the IP address up in the ARP table, or in the DHCP leases (see netutil.RetrieveVMIP)
+	ip, source, err := netutil.RetrieveVMIP(ctx, i.macAddr)
 	if err != nil {
 		return fmt.Errorf("failed to retrieve IP address: %w", err)
 	}
+	log.G(ctx).WithField("ip", ip).WithField("source", source).WithField("mac", i.macAddr).Info("found the VM's IP address")
 	i.IPAddress = ip
 	return nil
 }
